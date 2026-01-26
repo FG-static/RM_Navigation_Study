@@ -33,7 +33,7 @@ ros2 run turtlesim turtle_teleop_key --ros-args --remap turtle1/cmd_vel:=turtle2
 ros2 run rqt_console rqt_console
 ```
 或者在rqt上选择$\mathrm{Plugins>Logging>Console}$进入，界面如图所示
-![alt text](Image//image-3.png)
+![img1](https://github.com/FG-static/RM_Navigation_Study/blob/master/Ros2/Image/image-3.png?raw=true)
 第一部分显示来自系统的日志消息，第二部分是一个过滤器，可以选择严重性级别来过滤信息，也可以用右侧的加号来添加过滤条件，第三部分突出显示输入的```string```的信息，也可以添加过滤条件
 当你运行
 ```shell
@@ -100,7 +100,7 @@ rqt_graph
 ```
 来可视化节点和变化的话题$(\mathrm{Topic})$
 也可以通过rqt下的$\mathrm{Plugins > Introspection > Node~Graph}$来打开节点图，大概如图所示：
-![alt text](Image//image.png)
+![img2](https://github.com/FG-static/RM_Navigation_Study/blob/master/Ros2/Image/image.png?raw=true)
 这表明```/turtlesim```节点和```/teleop_turtle```节点通过一个话题相互通信,```/teleop_turtle```节点出版（出版者$\mathrm{Publisher}$）数据 (按键输入移动乌龟) 到```/turtle1/cmd_vel```话题，```/turtlesim```节点订阅（订阅者$\mathrm{Subscriber}）$话题接收数据。 
 运行
 ```shell
@@ -123,7 +123,7 @@ ros2 topic echo /turtle1/cmd_vel
 ```
 这个命令一开始并不会返回任何数据，因为它输出的数据都是通过```/teleop_turtle```发布的，即当你在```turtle_teleop_key```终端上按键移动乌龟时，你的```echo```终端才会返回实时信息
 现在回到$\mathrm{Node~Graph}$中关掉调试的hide，会发现```/_ros2cli_26646```是由```echo```终端创建的（数字可能有所不同），所以你可以发现```teleop_turtle```节点正在作为发布者不断发布```cmd_vel```的相关数据，同时```/_ros2cli_26646```作为```/turtle1/cmd_vel```的订阅者订阅这个数据，所以这个节点拥有两个订阅者
-![alt text](Image//image-2.png)
+![img3](https://github.com/FG-static/RM_Navigation_Study/blob/master/Ros2/Image/image-2.png?raw=true)
 我们可以通过
 ```shell
 ros2 topic info /turtle1/cmd_vel
@@ -611,7 +611,7 @@ ros2 launch turtle_tf2_py turtle_tf2_demo.launch.py
 ros2 run tf2_tools view_frames
 ```
 生成一个```frames_2025-12-27_11.46.26.pdf```内有一张图
-![alt text](Image//image-4.png)
+![img4](https://github.com/FG-static/RM_Navigation_Study/blob/master/Ros2/Image/image-4.png?raw=true)
 在这里，tf2持续发布两只乌龟相对于世界坐标系的位置和朝向，从而使turtle2持续跟随turtle1成为可能
 我们使用```ros2 run tf2_ros tf2_echo [reference_frame] [target_frame]```可以持续返回两个帧的相对变换，如果写
 ```bash
@@ -671,7 +671,7 @@ $\begin{bmatrix}
 ros2 run rviz2 rviz2 -d $(ros2 pkg prefix --share turtle_tf2_py)/rviz/turtle_rviz.rviz
 ```
 可以启动目前 turtle2 和 turtle1 相关的一个rviz工具：
-![alt text](Image//image-5.png)
+![img5](https://github.com/FG-static/RM_Navigation_Study/blob/master/Ros2/Image/image-5.png?raw=true)
 右上角两个小箭头分别表示两只海龟，它们现在是重合的，中心原点的右上半正方形部分表示默认 turtlesim 窗口内的样子
 
 ### $\mathrm{C++}环境$
@@ -3570,6 +3570,7 @@ ros2 launch urdf_tutorial display.launch.py model:=urdf/04-materials.urdf
 ros2 launch urdf_tutorial display.launch.py model:=urdf/05-visual.urdf
 ```
 运行查看
+![img6]()
 
 ### 终端
 #### 缓冲区
