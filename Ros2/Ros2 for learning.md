@@ -3570,7 +3570,7 @@ ros2 launch urdf_tutorial display.launch.py model:=urdf/04-materials.urdf
 ros2 launch urdf_tutorial display.launch.py model:=urdf/05-visual.urdf
 ```
 运行查看
-![img6]()
+![img6](https://github.com/FG-static/RM_Navigation_Study/blob/master/Ros2/Image/image-6.png?raw=true)
 
 ### 终端
 #### 缓冲区
