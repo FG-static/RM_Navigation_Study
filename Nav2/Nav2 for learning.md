@@ -49,4 +49,39 @@ rosdep install -y -r -q --from-paths src --ignore-src --rosdistro jazzy
 ```bash
 colcon build --symlink-install
 ```
-编译
+进行软链接编译
+（注意，直接进行编译可能会导致并行编译强制跑满所有内存和cpu直接卡死重启，为了避免这种情况，可以考虑设置交换内存为16~32G，同时进行限制性编译（即限制编译时只能一次编译一个项目等）例如：
+```bash
+MAKEFLAGS="-j1" colcon build --symlink-install --executor sequential --parallel-workers 1
+```
+这意味着一次进行一个项目编译，绝不多占用，这样不会导致卡死，但是仍有一个问题就是可能会出现编译器无法识别到`.hpp`文件的情况（明明存在且找到），这时候最好直接安装二进制版，不再折腾此编译，这里我们以二进制版本继续）
+输入
+```bash
+rm -rf ~/nav2_ws/src/navigation2
+```
+可以删除之前编译的源代码，使用
+```bash
+sudo apt install ros-jazzy-navigation2 ros-jazzy-nav2-bringup ros-jazzy-turtlebot3-gazebo
+```
+安装二进制版
+同时再使用
+```bash
+sudo apt install ros-jazzy-nav2-loopback-sim ros-jazzy-nav2-bringup ros-jazzy-turtlebot3-gazebo
+```
+安装```nav2_loopback_sim```，因为jazzy将nav2拆分的更细，光靠上面的无法安装全部
+（如果是在折腾全部编译中途传过来二进制版，则很可能遇到环境污染，此时需要删除编译产物
+```bash
+cd ~/nav2_ws
+rm -rf build/ install/ log/
+```
+记得设置环境变来嗯
+```bash
+export TURTLEBOT3_MODEL=burger
+export GAZEBO_MODEL_PATH=$GAZEBO_MODEL_PATH:/opt/ros/jazzy/share/turtlebot3_gazebo/models
+```
+）
+随后使用```ros2 launch nav2_bringup tb3_simulation_launch.py headless:=False```就能启动仿真了
+如果不走二进制安装，且实在无法编译源码，可以使用$\mathbf{Docker}$容器，这里不详细展开
+
+### 导航相关概念
+#### 生命周期
