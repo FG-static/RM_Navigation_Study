@@ -3116,7 +3116,8 @@ TOPIC LIST
 ### $\mathbf{rosdep}$
 
 ### $\mathbf{URDF}$
-#### 事前准备
+#### 示例包
+##### 事前准备
 首先安装rosdep，进入工作空间根目录使用
 ```bash
 sudo rosdep init
@@ -3154,7 +3155,7 @@ sudo apt install ros-jazzy-urdf-tutorail
 ```
 来安装
 
-#### 一个形状
+##### 一个形状
 ```urdf_tutorial```内有一个```01-myfirst.urdf```的urdf示例文件，里面是
 ```xml
 <?xml version="1.0"?>
@@ -3180,7 +3181,7 @@ ros2 launch urdf_tutorial display.launch.py model:=`ros2 pkg prefix --share urdf
 ```
 来在任意位置运行）
 
-#### 多个形状
+##### 多个形状
 查看示例代码```02-multipleshapes.urdf```：
 ```xml
 <?xml version="1.0"?>
@@ -3253,7 +3254,7 @@ ros2 launch urdf_tutorial display.launch.py model:=urdf/03-origins.urdf
 ```
 查看
 
-#### RGBA通道
+##### RGBA通道
 RGBA是可更改的，如：
 ```xml
 <?xml version="1.0"?>
@@ -3316,7 +3317,7 @@ ros2 launch urdf_tutorial display.launch.py model:=urdf/04-materials.urdf
 ```
 运行查看
 
-#### 完成模型
+##### 完成模型
 以下是一个较为完整的机器人（？）：
 ```xml
 <?xml version="1.0"?>
@@ -3572,6 +3573,51 @@ ros2 launch urdf_tutorial display.launch.py model:=urdf/05-visual.urdf
 运行查看
 ![img6](https://github.com/FG-static/RM_Navigation_Study/blob/master/Ros2/Image/image-6.png?raw=true)
 
+#### 建立可移动机器人模型
+我们可以先运行
+```bash
+ros2 launch urdf_tutorial display.launch.py model:=urdf/06-flexible.urdf
+```
+这将会额外启动一个gui界面，它可以通过滑条控制各个关节
+（这里的原理是，滑动后将值发布到对应话题，随后由```robot_state_publisher```计算不同部分之间的所有变换，然后用生成的变换树显示在rviz中）
+一个可移动机器人会包含以下关节：
+- **头**
+  身体和头部之间的连接是一个连续的关节，这意味着它可以从负无穷大到正无穷大的任何角度，车轮也是这样的，因此它们可以永远向两个方向滚动
+  ```xml
+  <joint name="head_swivel" type="continuous">
+    <parent link="base_link"/>
+    <child link="head"/>
+    <axis xyz="0 0 1"/>
+    <origin xyz="0 0 0.3"/>
+  </joint>
+  ```
+- **抓爪**
+  左右夹持器接头都被称为旋转接头，这意味着它们以与连续关节相同的方式旋转，但是它们有严格的限制
+  因此，我们必须包括**限制标签**，指定关节的上限和下限 (以弧度为单位)
+  除此之外，我们还必须为这个关节指定一个最大速度和力矩
+  ```xml
+  <joint name="left_gripper_joint" type="revolute">
+    <axis xyz="0 0 1"/>
+    <limit effort="1000.0" lower="0.0" upper="0.548" velocity="0.5"/>
+    <origin rpy="0 0 0" xyz="0.2 0.01 0"/>
+    <parent link="gripper_pole"/>
+    <child link="left_gripper"/>
+  </joint>
+  ```
+- **抓臂**
+  夹持器臂是一种不同的接头，即棱柱形接头，这意味着它沿着轴移动，而不是围绕它
+  这种平移运动使得机器人模型能够延伸和缩回它的抓臂
+  棱柱形臂的极限以与旋转接头相同的方式规定，单位是米
+  ```xml
+  <joint name="gripper_extension" type="prismatic">
+    <parent link="base_link"/>
+    <child link="gripper_pole"/>
+    <limit effort="1000.0" lower="-0.38" upper="0" velocity="0.5"/>
+    <origin rpy="0 0 0" xyz="0.19 0 0.2"/>
+  </joint>
+  ```
+
+还有其他两种关节，以后再讨论
 ### 终端
 #### 缓冲区
 以下是一个控制海龟移动的按键控制节点核心代码：
