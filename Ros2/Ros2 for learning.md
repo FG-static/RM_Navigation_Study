@@ -3618,6 +3618,158 @@ ros2 launch urdf_tutorial display.launch.py model:=urdf/06-flexible.urdf
   ```
 
 还有其他两种关节，以后再讨论
+我们前几节都在讨论`visual`元素，即视觉上，接下来我们还需要定义`collision`元素，用于管理机器人的碰撞，他和`visual`几乎一模一样，都有`<origin>`来定义位姿，`<geometry>`来定义形状，它们的等级也是一样的，是链接对象的**直接子元素**
+所以一个基本链接代码应该是这样的
+```xml
+<link name="base_link">
+  <visual>
+    <geometry>
+      <cylinder length="0.6" radius="0.2"/>
+    </geometry>
+    <material name="blue">
+      <color rgba="0 0 .8 1"/>
+    </material>
+  </visual>
+  <collision>
+    <geometry>
+      <cylinder length="0.6" radius="0.2"/>
+    </geometry>
+  </collision>
+</link>
+```
+在定义这个元素时，最好遵循这两个建议
+- 简单的几何体
+  检测两个简单的几何体碰撞比精细几何体检测更快，更简单，所以最好将碰撞模型改为比较符合的简单几何体
+- 安全区域
+  为了避免与敏感区域碰撞（例如头部），可以将几何体定义为一个包围它头部的圆柱体
+
+接下来需要定义物理属性
+- 惯性
+  每个元素都需要惯性标签`<inertia>`例：
+  ```xml
+  <link name="base_link">
+    <visual>
+      <geometry>
+        <cylinder length="0.6" radius="0.2"/>
+      </geometry>
+      <material name="blue">
+        <color rgba="0 0 .8 1"/>
+      </material>
+    </visual>
+    <collision>
+      <geometry>
+        <cylinder length="0.6" radius="0.2"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <mass value="10"/>
+      <inertia ixx="1e-3" ixy="0.0" ixz="0.0" iyy="1e-3" iyz="0.0" izz="1e-3"/>
+    </inertial>
+  </link>
+  ```
+  单位是$\mathrm{kg}$，它是一个$3\times 3$旋转惯性矩阵，由惯性元素指定且为对角矩阵，所以用六个元素表示即可
+  $$
+  \begin{bmatrix}
+    i_{xx} & i_{xy} & i_{xz} \\
+    i_{xy} & i_{yy} & i_{yz} \\
+    i_{xz} & i_{yz} & i_{zz} 
+  \end{bmatrix}
+  $$
+  除此之外还可以指定一个原点标签，以指定重心和惯性参考系（相对于链接的参考系）
+- 接触系数
+  可以通过在标签`<contact_coefficients>`定义：
+  - $\mathrm{mu}$ 摩擦系数
+  - $\mathrm{kp}$ 刚度系数
+  - $\mathrm{kd}$ 阻尼系数
+- 关节属性
+  关节的运动由关节动力学标签来指定
+  - 摩擦 - 物理静摩擦力
+    对于平移关节，单位为$\mathrm{N}$，对于旋转关节，单位为$\mathrm{N\cdot m}$
+  - 阻尼 - 物理阻尼值
+    对于平移关节，单位为$\mathrm{N\cdot s/m}$，对于旋转关节，单位为$\mathrm{N\cdot s\cdot m/rad}$
+
+  未指定情况下一般为0
+
+其他标签以后再讨论
+#### $\mathbf{Xacro}$
+##### 使用步骤
+xacro是一种用于xml的宏语言，使用它有以下几个步骤
+首先将`.urdf`改为`.xacro`，再在根标签`<robot>`中声明xacro的命名空间，让系统认识xacro开头的标签：
+```xml
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="my_robot">
+...
+</robot>
+```
+##### 功能
+- 常量替换
+  使用
+  ```xml
+  <xacro:property name = "wheel_radius" value="0.05" />
+  ```
+  这样我们就可以用`${wheel_radius}`替换数值0.05了，例如：
+  ```xml
+  <xacro:property name="PI" value="3.1415926535897931" />
+  <link name="base_link">
+    <visual>
+      <geometry>
+        <cylinder radius="${wheel_radius}" length="${wheel_radius * 2}" />
+      </geometry>
+    </visual>
+  </link>
+  ```
+  这些常量替换在```${}```的`{}`内可以使用数学符号进行数学运算
+- 宏
+  也就是可以写一个类似函数的东西，随时调用
+  们可以写一个这样的宏：
+  ```xml
+  <xacro:macro name="wheel_func" params="wheel_name reflect">
+    <link name="${wheel_name}_link">
+      <visual>
+        <origin xyz="0 0 0" rpy="${PI/2} 0 0"/>
+        <geometry>
+          <cylinder radius="${wheel_radius}" length="0.04"/>
+        </geometry>
+      </visual>
+    </link>
+
+    <joint name="${wheel_name}_joint" type="continuous">
+      <parent link="base_link"/>
+      <child link="${wheel_name}_link"/>
+      <origin xyz="0.1 ${reflect * 0.15} 0" rpy="0 0 0"/>
+      <axis xyz="0 1 0"/>
+    </joint>
+  </xacro:macro>
+  ```
+  调用的时候直接
+  ```xml
+  <xacro:wheel_func wheel_name="left"  reflect="1" />
+  <xacro:wheel_func wheel_name="right" reflect="-1" />
+  ```
+  就行了，这样编译器就会先把上面的宏填入对应的参数（1和-1）后再整体代码复制替换到对应行上
+- 合并文件
+  我们可以将不同的元件写到不同的`.xacro`上再通过总文件合并，例如：
+  ```xml
+  <xacro:include filename="lidar.xacro" />
+  <xacro:include filename="arm.xacro" />
+  ```
+
+搞定一切后，我们最后需要的还是`.urdf`文件，可以通过
+```bash
+xacro my_robot.xacro > my_robot.urdf
+```
+来查看生成的urdf文件对不对，也是一个简单的手动转换方法
+而在实际可以使用效率更高的自动转换，即在launch文件中写
+```py
+import xacro
+from launch_ros.descriptions import ParameterValue
+
+# ... 在生成描述时
+robot_description_config = xacro.process_file(xacro_file_path)
+robot_description = {'robot_description': robot_description_config.toxml()}
+```
+类似这样的代码即可
+
 ### 终端
 #### 缓冲区
 以下是一个控制海龟移动的按键控制节点核心代码：
