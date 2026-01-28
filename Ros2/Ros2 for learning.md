@@ -674,6 +674,8 @@ ros2 run rviz2 rviz2 -d $(ros2 pkg prefix --share turtle_tf2_py)/rviz/turtle_rvi
 ![img5](https://github.com/FG-static/RM_Navigation_Study/blob/master/Ros2/Image/image-5.png?raw=true)
 右上角两个小箭头分别表示两只海龟，它们现在是重合的，中心原点的右上半正方形部分表示默认 turtlesim 窗口内的样子
 
+### $\mathbf{Fast~DDS~Discovery~Server}$
+
 ### $\mathrm{C++}环境$
 #### 创建与运行功能包
 先输入
@@ -2989,6 +2991,8 @@ try {
 }
 ```
 这里的```.createSharedInstance```表示用共享指针实例化对象
+
+### 主题统计
 
 ### 部分$\mathrm{ROS~2}$语法
 对一个节点的```.cpp```或```.hpp```文件如果要让他派上用场首先需要导入库```rclcpp.hpp```，这是一个ros2的**基本函数库**，我们声明对应的类，且这个类应该继承```rclcpp::Node```，在类的构造函数中我们应顺便调用```Node```的构造函数，这个构造函数需要一个字符串参数，表示这个节点的名字
