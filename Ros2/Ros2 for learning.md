@@ -3770,6 +3770,272 @@ robot_description = {'robot_description': robot_description_config.toxml()}
 ```
 类似这样的代码即可
 
+#### `robot_state_publisher`
+使用`robot_state_publisher`能将机器人的状态发布到`/tf2`，我们先创建一个工作空间`second_ros2_ws`，然后进入其下的`src`文件夹，使用
+```bash
+ros2 pkg create urdf_tutorial_r2d2 --build-type ament_python --dependencies rclpy --license Apache-2.0
+```
+创建一个功能包`urdf_tutorial_r2d2`并进入这个文件夹内
+创建一个文件夹`urdf`并进入
+随后我们在这个文件夹下创建一个`r2d2.urdf.xml`文件，写一个精简的urdf代码：
+```xml
+<?xml version="1.0"?>
+<robot name="r2d2">
+
+  <material name="blue">
+    <color rgba="0 0 0.8 1"/>
+  </material>
+  <material name="white">
+    <color rgba="1 1 1 1"/>
+  </material>
+
+  <link name="axis">
+    <visual>
+      <geometry>
+        <cylinder length="0.6" radius="0.2"/>
+      </geometry>
+      <material name="blue"/>
+    </visual>
+  </link>
+
+  <link name="head">
+    <visual>
+      <geometry>
+        <sphere radius="0.2"/>
+      </geometry>
+      <material name="white"/>
+    </visual>
+  </link>
+
+  <joint name="swivel" type="continuous">
+    <parent link="axis"/>
+    <child link="head"/>
+    <axis xyz="0 0 1"/>
+    <origin xyz="0 0 0.3"/>
+  </joint>
+
+  <link name="tilt_link">
+    <visual>
+      <geometry>
+        <box size="0.05 0.1 0.05"/>
+      </geometry>
+      <material name="blue"/>
+    </visual>
+  </link>
+
+  <joint name="tilt" type="revolute">
+    <parent link="head"/>
+    <child link="tilt_link"/>
+    <origin xyz="0.15 0 0.1" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-0.5" upper="0.5" effort="10" velocity="1.0"/>
+  </joint>
+
+  <link name="periscope">
+    <visual>
+      <geometry>
+        <cylinder length="0.2" radius="0.02"/>
+      </geometry>
+      <material name="white"/>
+    </visual>
+  </link>
+
+  <joint name="periscope" type="prismatic">
+    <parent link="head"/>
+    <child link="periscope"/>
+    <axis xyz="0 0 1"/>
+    <origin xyz="0 0 0.2"/>
+    <limit lower="0" upper="0.2" effort="10" velocity="1.0"/>
+  </joint>
+
+</robot>
+```
+这个代码不要随便写，必须要与后续的`state_publisher.py`对应
+然后实际上还需要一个与`urdf`文件夹同级的`rviz`文件夹存rviz2的配置文件，但实际上对于初学者不需要，先跳过
+接下来使用Python编写ros2节点（因为教程没有cpp代码），进入`~/second_ros2_ws/src/urdf_tutorial_r2d2/urdf_tutorial_r2d2`目录并创建一个`state_publisher.py`文件，填入
+```py
+from math import sin, cos, pi
+import rclpy
+from rclpy.node import Node
+from rclpy.qos import QoSProfile
+from geometry_msgs.msg import Quaternion
+from sensor_msgs.msg import JointState
+from tf2_ros import TransformBroadcaster, TransformStamped
+
+class StatePublisher(Node):
+
+    def __init__(self):
+        rclpy.init()
+        super().__init__('state_publisher')
+
+        qos_profile = QoSProfile(depth=10)
+        self.joint_pub = self.create_publisher(JointState, 'joint_states', qos_profile)
+        self.broadcaster = TransformBroadcaster(self, qos=qos_profile)
+        self.nodeName = self.get_name()
+        self.get_logger().info("{0} started".format(self.nodeName))
+
+        degree = pi / 180.0
+        loop_rate = self.create_rate(30)
+
+        # robot state
+        tilt = 0.
+        tinc = degree
+        swivel = 0.
+        angle = 0.
+        height = 0.
+        hinc = 0.005
+
+        # message declarations
+        odom_trans = TransformStamped()
+        odom_trans.header.frame_id = 'odom'
+        odom_trans.child_frame_id = 'axis'
+        joint_state = JointState()
+
+        try:
+            while rclpy.ok():
+                rclpy.spin_once(self)
+
+                # update joint_state
+                now = self.get_clock().now()
+                joint_state.header.stamp = now.to_msg()
+                joint_state.name = ['swivel', 'tilt', 'periscope']
+                joint_state.position = [swivel, tilt, height]
+
+                # update transform
+                # (moving in a circle with radius=2)
+                odom_trans.header.stamp = now.to_msg()
+                odom_trans.transform.translation.x = cos(angle)*2
+                odom_trans.transform.translation.y = sin(angle)*2
+                odom_trans.transform.translation.z = 0.7
+                odom_trans.transform.rotation = \
+                    euler_to_quaternion(0, 0, angle + pi/2) # roll,pitch,yaw
+
+                # send the joint state and transform
+                self.joint_pub.publish(joint_state)
+                self.broadcaster.sendTransform(odom_trans)
+
+                # Create new robot state
+                tilt += tinc
+                if tilt < -0.5 or tilt > 0.0:
+                    tinc *= -1
+                height += hinc
+                if height > 0.2 or height < 0.0:
+                    hinc *= -1
+                swivel += degree
+                angle += degree/4
+
+                # This will adjust as needed per iteration
+                loop_rate.sleep()
+
+        except KeyboardInterrupt:
+            pass
+
+def euler_to_quaternion(roll, pitch, yaw):
+    qx = sin(roll/2) * cos(pitch/2) * cos(yaw/2) - cos(roll/2) * sin(pitch/2) * sin(yaw/2)
+    qy = cos(roll/2) * sin(pitch/2) * cos(yaw/2) + sin(roll/2) * cos(pitch/2) * sin(yaw/2)
+    qz = cos(roll/2) * cos(pitch/2) * sin(yaw/2) - sin(roll/2) * sin(pitch/2) * cos(yaw/2)
+    qw = cos(roll/2) * cos(pitch/2) * cos(yaw/2) + sin(roll/2) * sin(pitch/2) * sin(yaw/2)
+    return Quaternion(x=qx, y=qy, z=qz, w=qw)
+
+def main():
+    node = StatePublisher()
+
+if __name__ == '__main__':
+    main()
+```
+这是一个发布状态的代码，随后编写一个launch文件，在`src/urdf_tutorial_r2d2`目录下创建一个`launch`文件夹创建一个文件`demo.launch.py`并填入
+```py
+import os
+from ament_index_python.packages import get_package_share_directory
+from launch import LaunchDescription
+from launch.actions import DeclareLaunchArgument
+from launch.substitutions import LaunchConfiguration
+from launch_ros.actions import Node
+
+def generate_launch_description():
+
+    use_sim_time = LaunchConfiguration('use_sim_time', default='false')
+
+    urdf_file_name = 'r2d2.urdf.xml'
+    urdf = os.path.join(
+        get_package_share_directory('urdf_tutorial_r2d2'),
+        urdf_file_name)
+    with open(urdf, 'r') as infp:
+        robot_desc = infp.read()
+
+    return LaunchDescription([
+        DeclareLaunchArgument(
+            'use_sim_time',
+            default_value='false',
+            description='Use simulation (Gazebo) clock if true'),
+        Node(
+            package='robot_state_publisher',
+            executable='robot_state_publisher',
+            name='robot_state_publisher',
+            output='screen',
+            parameters=[{'use_sim_time': use_sim_time, 'robot_description': robot_desc}],
+            arguments=[urdf]),
+        Node(
+            package='urdf_tutorial_r2d2',
+            executable='state_publisher',
+            name='state_publisher',
+            output='screen'),
+    ])
+```
+随后退出该文件夹，编写`setup.py`文件，它最后应该是这样的
+```py
+import os
+from glob import glob
+from setuptools import setup
+from setuptools import find_packages
+
+package_name = 'urdf_tutorial_r2d2'
+
+setup(
+    name=package_name,
+    version='0.0.0',
+    packages=find_packages(exclude=['test']),
+    data_files=[
+        ('share/ament_index/resource_index/packages',
+            ['resource/' + package_name]),
+        ('share/' + package_name, ['package.xml']),
+        (os.path.join('share', package_name, 'launch'), glob(os.path.join('launch', '*launch.[pxy][yma]*'))),
+        (os.path.join('share', package_name), glob('urdf/*')),
+    ],
+    install_requires=['setuptools'],
+    zip_safe=True,
+    maintainer='goose',
+    maintainer_email='meis38@126.com',
+    description='TODO: Package description',
+    license='Apache-2.0',
+    extras_require={
+        'test': [
+            'pytest',
+        ],
+    },
+    entry_points={
+        'console_scripts': [
+            'state_publisher = urdf_tutorial_r2d2.state_publisher:main'
+        ],
+    },
+)
+```
+随后退到工作空间使用
+```bash
+colcon build --symlink-install --packages-select urdf_tutorial_r2d2
+```
+软链接编译包，刷新环境后运行
+```bash
+ros2 launch urdf_tutorial_r2d2 demo.launch.py
+```
+启动包，然后打开一个rviz
+```bash
+rviz2 -d ~/second_ros2_ws/install/urdf_tutorial_r2d2/share/urdf_tutorial_r2d2/r2d2.rviz
+```
+由于我们没有设置`.rviz`配置文件，所以我们需要手动用左下角的Add添加`RobotModel`，并在`Description Topic`选择`/robot_description`，我们在`Fixed Frame`选择`odom`，就能看到一个机器人（？）绕圆周运动了，并且头还会伸缩
+大概会看到这样的画面：
+![alt text](Image//image-7.png)
+
 ### 终端
 #### 缓冲区
 以下是一个控制海龟移动的按键控制节点核心代码：
