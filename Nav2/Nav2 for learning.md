@@ -203,4 +203,95 @@ geometry_msgs/TwistWithCovariance twist
 最后注意整个tf树应该是`odom` -> `base_footprint` -> `base_link` -> `other`
 注意不要在`.urdf`里写错`<parent link>`和`<child link>`
 
+#### $\mathbf{Gazebo}$
+在进入下一步前，可以先在urdf中集成gazebo插件，它可以接管我们原本写的核心框架中负责**监听`/cmd_vel`并发布`odom`和TF**的工作
+既然是在urdf中集成，那我们需要直接修改`.urdf.xacro`（如果没有使用xacro则修改`.urdf`），在`</robot>`标签前添加：
+```xml
+<gazebo>
+    <plugin
+        filename="gz-sim-diff-drive-system"
+        name="gz::sim::systems::DiffDrive">
+        <left_joint>front_left_wheel_joint</left_joint> 
+        <right_joint>front_right_wheel_joint</right_joint>
+
+        <wheel_separation>${chassis_width + wheel_width}</wheel_separation>
+        <wheel_radius>${wheel_radius}</wheel_radius>
+
+        <topic>cmd_vel</topic>
+        <odom_topic>odom</odom_topic>
+        <frame_id>odom</frame_id>
+        <child_frame_id>base_footprint</child_frame_id>
+        <publish_odom_tf>true</publish_odom_tf>
+    </plugin>
+
+    <plugin
+        filename="gz-sim-joint-state-publisher-system"
+        name="gz::sim::systems::JointStatePublisher">
+        <topic>joint_states</topic>
+    </plugin>
+</gazebo>
+```
+其中在humble版本下会有`<gazebo reference="link_name">`即包含的内容表示重新识别机器人在仿真环境中的颜色（因为gazebo使用不同的渲染引擎不识别urdf中的`<material>`标签），这个标签内还可定义摩擦力（如`<mu1>`等标签），在jazzy版gazebo进行了大更新，许多旧版的规则不适用，目前不用写这个标签的原因可能是渲染引擎已经可以自动识别
+随后的`<gazebo>`标签内的内容主要是把这个机器人的属性添加到gazebo中，让gazebo“认识”这个机器人，最后的
+```xml
+<topic>cmd_vel</topic>
+<odom_topic>odom</odom_topic>
+<frame_id>odom</frame_id>
+<child_frame_id>base_footprint</child_frame_id>
+<publish_odom_tf>true</publish_odom_tf>
+```
+分别表明订阅速度的话题名称？里程计的话题名称？里程计的坐标系名称？里程计要转换到的机器人基准点坐标系名称？以及是否发布tf转换？
+配置好后gazebo会代替原本核心框架中的三件事：
+- 订阅`/cmd_vel`并发布速度，它会根据物理学推导最终机器人的位姿
+- 物理仿真
+- 发布里程计话题`/odom`和TF变换（`odom` -> `base_footprint`）
+
+之后还需要写一个新的launch文件，负责启动robot state publisher、Gazebo、调用`spawn_entity`节点-负责将机器人模型添加到gazebo里、bridge桥接节点-桥接gazebo和ros2的话题（gazebo内部使用$\mathbf{gz~transport}$协议，而ros2内部使用$\mathbf{DDS}$协议，这样会导致ros2无法通过`ros2 topic list`等获取数据）
+（注意：使用jazzy下的gazebo应提前用
+```bash
+sudo apt install ros-jazzy-ros-gz
+```
+安装gazebo依赖，同时`spawn_entity`节点在新版gazebo下的可执行程序变为了`create`，位于`/opt/ros/jazzy/lib/ros_gz_sim`，而gazebo的launch文件变为了`gz_sim.launch.py`，位于`/opt/ros/jazzy/share/ros_gz_sim/launch`，以及最重要的一点，必须先提前为gazebo设定好预设场景，否则一开始机器人就往下掉，因为没有地板，可以使用`empty.sdf`或`shapes.sdf`）
+
 #### 配置传感器
+在开始配置传感器前，先在urdf中建模出雷达，同时也要给他各种物理属性（碰撞箱和惯性）
+随后我们在`laser_joint`的`</joint>`标签后添加
+```xml
+<gazebo reference="laser_link">
+    <sensor name="gpu_lidar" type="gpu_lidar">
+        <topic>scan</topic>
+        <pose>0 0 0 0 0 0</pose>
+        <frame_id>laser_link</frame_id>
+        <gz_frame_id>laser_link</gz_frame_id>
+        <visualize>true</visualize> <update_rate>10</update_rate>
+        <lidar>
+            <scan>
+                <horizontal>
+                    <samples>360</samples>
+                    <resolution>1</resolution>
+                    <min_angle>-3.14159</min_angle>
+                    <max_angle>3.14159</max_angle>
+                </horizontal>
+            </scan>
+            <range>
+                <min>0.12</min>
+                <max>12.0</max>
+                <resolution>0.01</resolution>
+            </range>
+        </lidar>
+        <plugin filename="gz-sim-sensors-system" name="gz::sim::systems::Sensors">
+            <render_engine>ogre2</render_engine>
+        </plugin>
+    </sensor>
+</gazebo>
+```
+这段代码表明雷达是一个`gpu_lidar`类型（利用显卡扫描而不是cpu）的雷达，第一个`<topic>`标签用于告诉gazebo将扫描的信息发到`/scan`话题，否则它会发到自己的一个长的话题，后面的`<pose>`标签则分别表示相对于原`laser_link`分别在`x y z r p y`上的偏移量，这里的`<frame_id>`和`<gz_frame_id>`标签可能很重要，它告诉rviz雷达消息来源于这个坐标系，`<visualize>`标签表示显示扫描光束，下一个标签明显是扫描频率（单位是$\mathrm{Hz}$）
+之后`<scan>`标签里的内容是2D扫描参数
+- `<samples>`
+  表示一圈扫描产生360个采样点
+- `<min/max_angle>`
+  表示扫描范围，这里是全方位扫描
+
+之后的`<range>`标签表示测距范围，里面的第三个标签表示传感器能识别$1\mathrm{cm}$级别的距离变化
+后面就是插件加载标签了，`orge2`是指定的渲染引擎
+这里时间戳同步非常重要，请注意启动rviz2时它的时间戳是仿真时间内的（启动左下角看时间），同时也要注意tf2 monitor给出的时间戳延迟（Net Delay）最好为0
