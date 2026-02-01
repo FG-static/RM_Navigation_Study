@@ -295,3 +295,36 @@ sudo apt install ros-jazzy-ros-gz
 之后的`<range>`标签表示测距范围，里面的第三个标签表示传感器能识别$1\mathrm{cm}$级别的距离变化
 后面就是插件加载标签了，`orge2`是指定的渲染引擎
 这里时间戳同步非常重要，请注意启动rviz2时它的时间戳是仿真时间内的（启动左下角看时间），同时也要注意tf2 monitor给出的时间戳延迟（Net Delay）最好为0
+我们也可以添加一个摄像头，用来捕捉图像，只需要在urdf的`<gazebo>`标签下建立和`<sensor>`同标签的另一个`<sensor>`标签下有`<camera>`标签：
+```xml
+<sensor name="camera" type="camera">
+    <pose>0.2 0 0.2 0 0 0</pose> <update_rate>30</update_rate>
+    <frame_id>laser_link</frame_id>
+    <gz_frame_id>laser_link</gz_frame_id>
+    <visualize>true</visualize>
+    <topic>camera/image_raw</topic> 
+    <camera>
+        <horizontal_fov>1.089</horizontal_fov>
+        <image>
+            <width>640</width>
+            <height>480</height>
+            <format>R8G8B8</format>
+        </image>
+        <clip>
+            <near>0.05</near>
+            <far>8.0</far>
+        </clip>
+    </camera>
+</sensor>
+```
+同时在py的桥接器节点中添加图像和摄像机信息的传输：
+```py
+...
+'/camera/image_raw@sensor_msgs/msg/Image@gz.msgs.Image',
+'/camera/camera_info@sensor_msgs/msg/CameraInfo@gz.msgs.CameraInfo',
+...
+```
+最后放入两个障碍物并将rviz2中的`/scan`话题下的`LaserScan`添加，再将这个下的`Topic`下的`Reliability Policy`改为`Best Effort`，就能看到扫描的红色轨迹，之后添加`/camera/image_raw`话题下`Image`添加，就能在左下角看到捕捉的图了，效果大概是这样：
+![alt text](Image//image-4.png)
+同时如果场景选择的是`sensors.sdf`，能在gazebo里看到
+![alt text](Image//image-5.png)
