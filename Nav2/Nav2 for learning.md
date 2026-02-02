@@ -236,11 +236,13 @@ geometry_msgs/TwistWithCovariance twist
 ```xml
 <topic>cmd_vel</topic>
 <odom_topic>odom</odom_topic>
+<tf_topic>/tf</tf_topic>
 <frame_id>odom</frame_id>
 <child_frame_id>base_footprint</child_frame_id>
 <publish_odom_tf>true</publish_odom_tf>
+<use_gz_time>true</use_gz_time>
 ```
-分别表明订阅速度的话题名称？里程计的话题名称？里程计的坐标系名称？里程计要转换到的机器人基准点坐标系名称？以及是否发布tf转换？
+分别表明订阅速度的话题名称？里程计的话题名称？tf树话题名称？里程计的坐标系名称？里程计要转换到的机器人基准点坐标系名称？以及是否发布tf转换？是否使用gazebo仿真时间？
 配置好后gazebo会代替原本核心框架中的三件事：
 - 订阅`/cmd_vel`并发布速度，它会根据物理学推导最终机器人的位姿
 - 物理仿真
@@ -328,3 +330,24 @@ sudo apt install ros-jazzy-ros-gz
 ![alt text](Image//image-4.png)
 同时如果场景选择的是`sensors.sdf`，能在gazebo里看到
 ![alt text](Image//image-5.png)
+
+#### 配置$\mathbf{Footprint}$
+`footprint`和我们之前定义的`base_footprint`不一样，`footprint`是机器人在底面的投影，说白了就是碰撞面积，用于给规划器规划路径作为参考数据，而`base_footprint`是机器人中心在底面的投影
+`footprint`更表示多边形，如果你的机器人不需要很精确的碰撞，改用`robot_radius`可直接使用半径表示碰撞面积
+我们需要一个`nav2_params.yaml`文件来配置相关信息，https://github.com/ros-navigation/navigation2_tutorials/blob/rolling/sam_bot_description/config/nav2_params.yaml 是一个官方提供的nav2教程包里的默认nav2 yaml文件（最新版本下），按理来说一般不通用，因为我们没有按照教程包编写机器人，但是这个确实能让我们的代码跑起来，我们将`robot_radius`那一栏（一共有两处，全局代价地图和局部代价地图，全局代价地图上的可以不改）改为`footprint`，输入格式为
+```py
+footprint: "[ [0.2, 0.15], [0.2, -0.15], [-0.2, -0.15], [-0.2, 0.15] ]"
+```
+类似这样按顺时针或逆时针的方式输入所有角点即可，`robot_radius`可填$0.25$
+我们编译运行gazebo后，运行
+```bash
+ros2 run tf2_ros static_transform_publisher 0 0 0 0 0 0 map odom
+```
+来发送一个`map` -> `odom`的转换
+随后用
+```bash
+ros2 launch nav2_bringup navigation_launch.py params_file:=$HOME/nav2_test/src/my_nav2_robot/config/nav2_params.yaml 
+```
+运行`nav2_params.yaml`文件，按理来说不出现各种`[ERROR]`和`[FATAL]`信息，再在rviz中添加两个`Polygon`，应该能看到如下场景（记住`Fixed Frame`要设置为`map`）
+![alt text](Image//image-6.png)
+（注意：在挪用别人的`nav2_params.yaml`时，需要注意修改`robot_base_frame`、`odom_frame`、`global_frame`（一般是`map`）和urdf里一致，同时`observation_sources`下的`topic`要和你的扫描话题一致，最后就是其他机器人的动力学约束，和你本身的机器人一致，最重要的是$\mathbf{MPPI/DWB}$控制器参数和激光雷达的`max_obstacle_height`）
