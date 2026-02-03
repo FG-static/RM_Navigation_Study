@@ -101,6 +101,38 @@ export GAZEBO_MODEL_PATH=$GAZEBO_MODEL_PATH:/opt/ros/jazzy/share/turtlebot3_gaze
 
 在nav2中，我们可以使用`nav2_util LifecycleNode`这个包装器，它统一了原有的复杂逻辑并简化了操作，同时它还拥有一个`bond`，这个东西用于连接**生命周期管理器**与各个导航服务，如果`bond`断开，管理器认为服务器不一定处于Active状态，无法信任，会直接**向下过渡**，让所有的导航节点都变为Inactive或者Unconfigured状态
 
+*在后文学习了`nav2_params.yaml`文件的配置后再往下看横线内的内容*
+
+---
+生命周期节点统一由`lifecycle_manager`控制，如果想要增加自己的生命周期节点，需在某个launch文件中修改，如果目前是遵照官方的教程，使用`bringup_launch.py`和其调用的`navigation_launch.py`启动的话，那就在这两个文件中找到启动`lifecycle_manager`的那一个文件进行修改，例如添加一个自定义`sensor_driver`节点：
+```py
+lifecycle_nodes = ['sensor_driver',
+                   'controller_server',
+                   'smoother_server',
+                   'planner_server',
+                   'behavior_server',
+                   'bt_navigator',
+                   'waypoint_follower']
+...
+Node(
+    package='nav2_sensor_driver',
+    executable='sensor_driver',
+    name='sensor_driver',
+    output='screen',
+    parameters=[configured_params],
+    remappings=remappings),
+Node(
+    package='nav2_lifecycle_manager',
+    executable='lifecycle_manager',
+    name='lifecycle_manager_navigation',
+    output='screen',
+    parameters=[{'autostart': autostart},
+                {'node_names': lifecycle_nodes}]),
+```
+`lifecycle_manager_navigation`需要填入`lifecycle_nodes`作为参数记录节点名，而我们要添加的新节点名称就添加到`lifecycle_nodes`里，并额外新定义一个节点`Node`
+
+---
+
 #### 有限状态机($\mathbf{Finite~State~Machine,~FSM}$)
 状态机是一种数学模型，描述了一个对象在其生命周期内所经历的状态，以及由于触发事件而导致的状态转换
 有限状态机-FSM就是有限个状态，包含
@@ -350,4 +382,66 @@ ros2 launch nav2_bringup navigation_launch.py params_file:=$HOME/nav2_test/src/m
 ```
 运行`nav2_params.yaml`文件，按理来说不出现各种`[ERROR]`和`[FATAL]`信息，再在rviz中添加两个`Polygon`，应该能看到如下场景（记住`Fixed Frame`要设置为`map`）
 ![alt text](Image//image-6.png)
-（注意：在挪用别人的`nav2_params.yaml`时，需要注意修改`robot_base_frame`、`odom_frame`、`global_frame`（一般是`map`）和urdf里一致，同时`observation_sources`下的`topic`要和你的扫描话题`/scan`一致，最后就是其他机器人的动力学约束，和你本身的机器人一致，最重要的是$\mathbf{MPPI/DWB}$控制器参数和激光雷达的`max_obstacle_height`）
+（注意：在挪用别人的`nav2_params.yaml`时，需要注意修改`robot_base_frame`、`odom_frame`、`global_frame`（一般是`map`）和urdf里一致，同时`observation_sources`下的`topic`要和你的扫描话题`/scan`一致，最后就是其他机器人的动力学约束，和你本身的机器人一致，最重要的是$\mathbf{MPPI/DWB}$控制器参数和激光雷达的`max_obstacle_height`，同时注意类型对齐，即如果`/cmd_vel`的类型不带`Stamped`，应该在文件中将所有地方的`enable_stamped_cmd_vel`全都设置为`false`）
+在地图方面，由于官方的`.yaml`文件所在的教程包内自带地图文件，如果想不使用地图文件运行，建议在`global_costmap`下新增`rolling_window`设置为`true`，然后将`plugins`的`static_layer`去掉，同时安装slam
+```bash
+sudo apt install ros-jazzy-slam-toolbox
+```
+我们最好先将`robot.urdf.xacro`内的`<publish_odom_tf>`设为`false`
+随后先运行
+```bash
+ros2 launch slam_toolbox online_async_launch.py use_sim_time:=True
+```
+再运行nav2
+```bash
+ros2 launch nav2_bringup bringup_launch.py use_sim_time:=True params_file:=$HOME/nav2_test/src/my_nav2_robot/config/nav2_params.yaml
+```
+需要注意的是，这次我们使用`bringup_launch.py`启动，它还多启动了`amcl`和`map_server`节点
+这时slam会自动扫描并建图，同时也会自动发布`map` -> `odom`的转换
+编写这个`nav2_params.yaml`实际上就已经开始为规划器(`planner server`)和控制器(`controller server`)配置了，目前的这个`nav2_params2.yaml`文件为规划器配备了`NavfnPlanner`插件，支持$\mathbf{Dijkstra}$算法和$\mathbf{A}^*$算法，控制器配备了`MPPIController`插件，基于模型预测路径积分
+对规划器：
+![alt text](Image//image-7.png)
+示例：
+```py
+planner_server:
+  ros__parameters:
+    planner_plugins: ['GridBased']
+    GridBased:
+      plugin: 'nav2_navfn_planner::NavfnPlanner' # In Iron and older versions, "/" was used instead of "::"
+```
+对控制器：
+![alt text](Image//image-8.png)
+示例：
+```py
+controller_server:
+  ros__parameters:
+    controller_plugins: ["FollowPath"]
+    FollowPath:
+       plugin: "dwb_core::DWBLocalPlanner"
+```
+
+#### 组件
+**组件**，$\mathbf{Composition}$，首先我们要知道nav2启动后，如果没有组件，那么所有节点都单独占一个线程运行，这样做不仅很消耗cpu资源和内存，并且节点互相通信时需要拷贝大量信息来交流
+如果开启组件，那么就相当于让所有节点都在一个线程运行，不仅节省内存和cpu资源，通信也无需拷贝，实现0拷贝通信
+如何实现？组件提供了一个**容器**的概念，节点放入容器后，容器内的所有节点就会在同一个线程同时运行，所以我们也可以实现多个容器，存放不同数量不同类型的节点，使得同时存在若干个线程分别同时运行着若干个节点，例如
+```py
+container = ComposableNodeContainer(
+    name='my_container',
+    namespace='',
+    package='rclcpp_components',
+    executable='component_container',
+    composable_node_descriptions=[
+        ComposableNode(
+            package='nav2_route_server',
+            plugin='nav2_route_server::RouteServer',
+            name='nav2_route_server'),
+    ],
+    output='screen',
+)
+```
+创建了一个新容器`container`，里面有一个名为`nav2_route_server`的节点，如果想要更多节点，直接在`composable_node_descriptions`内用`ComposableNode`描述即可
+这个代码写到官方提供的`navigation_launch.py`中（如果自己没有写自己叠nav2启动的launch文件）
+随后必须将包含服务器的功能包添加到`packages.xml`中
+```xml
+<exec_depend>nav2_route_server</exec_depend>
+```
