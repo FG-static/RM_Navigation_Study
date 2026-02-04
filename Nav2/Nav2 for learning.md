@@ -398,6 +398,27 @@ ros2 launch nav2_bringup bringup_launch.py use_sim_time:=True params_file:=$HOME
 ```
 需要注意的是，这次我们使用`bringup_launch.py`启动，它还多启动了`amcl`和`map_server`节点
 这时slam会自动扫描并建图，同时也会自动发布`map` -> `odom`的转换
+如果你的小车是四轮，在`<gazebo>`中设置两个轮标签时可能会导致后续gazebo转动时由于另外两个轮摩擦力太大导致gazebo中无法转动，rviz中可以转动但是`LaserScan`的扫描物也会一起转动，这很可能是摩擦力和扭矩的问题，我们可以设置
+```xml
+<gazebo reference="rear_left_wheel_link">
+    <mu1>0.01</mu1> 
+    <mu2>0.01</mu2>
+</gazebo>
+<gazebo reference="rear_right_wheel_link">
+    <mu1>0.01</mu1>
+    <mu2>0.01</mu2>
+</gazebo>
+```
+以及
+```xml
+<max_wheel_torque>200</max_wheel_torque> ```
+```
+设置两轮摩擦力和最大扭矩
+在这里**扭矩**$(\mathbf{Torque})$指的是让物体绕轴转动的力，它的方向实际上平行于转动轴，遵循右手定则（即如果扭矩是正的，那就是大拇指方向为扭矩方向，其余四指方向为旋转方向（逆时针），反之亦然），公式为$$
+\vec{\tau}=\vec{r}\times\vec{F}$$即扭矩矢量=力臂矢量$\times$力矢量
+这里扭矩很像另一个概念**旋度**$(\mathbf{Curl})=\nabla \times F$，用于衡量向量场中某点的旋转程度，方向和扭矩一致
+完成一切后启动整个项目，在`2D Pose Estimate`选定机器人位置后再`2D Goal Pose`选定目标点后应该能看到机器人正常规划路径
+![alt text](Image//image-9.png)
 编写这个`nav2_params.yaml`实际上就已经开始为规划器(`planner server`)和控制器(`controller server`)配置了，目前的这个`nav2_params2.yaml`文件为规划器配备了`NavfnPlanner`插件，支持$\mathbf{Dijkstra}$算法和$\mathbf{A}^*$算法，控制器配备了`MPPIController`插件，基于模型预测路径积分
 对规划器：
 ![alt text](Image//image-7.png)
@@ -445,3 +466,26 @@ container = ComposableNodeContainer(
 ```xml
 <exec_depend>nav2_route_server</exec_depend>
 ```
+
+#### 地图系统
+nav2中地图使用代价地图为模式，它包含三个层
+- 静态层$-\mathrm{Static~Layer}$
+  来源于`map_server`加载的`.yaml`和`.pgm`文件，提供一些固定障碍物
+- 障碍物层$-\mathrm{Obstacle~Layer}$
+  来源于激光雷达和深度相机，实时感知静态层、地图上没有的东西（箱子，路人等）
+- 膨胀层$-\mathrm{Inflation~Layer}$
+  通过计算机器人的footprint数据，为地图障碍物周边附加若干层，防止机器人碰撞
+
+一般来说一个`map_server`需要这其中的第一、三个层（在`nav2_params.yaml`编写），其中第一个层需要传入地图文件`.pgm`和`.yaml`，同时你也需要启动`amcl`进行**蒙特卡洛法**定位机器人在地图的位置，如果暂时没有地图文件，那就可以去掉第一个层，使用slam进行建图，同时需要设置地图滚动模式（`rolling_window`），这样就会使用雷达全方位扫描来进行建图，此时就不需要开启`amcl`了，因为正在即时建图
+你也可以用slam跑过一次地图生成`.yaml`和`.pgm`后，使用`amcl`记载两个地图文件，关掉slam进行运行
+即先控制机器人跑完整张图，等地图形成差不多后，在新控制台输入
+```bash
+ros2 run nav2_map_server map_saver_cli -f map1
+```
+可以保存一个名为`map1`的`.yaml`和`.pgm`文件在当前目录下（你需要先`cd`到你功能包的`maps`目录下）
+下次启动时关掉slam，加载地图，把静态层加回来，关掉滚动窗口就可以进入导航模式（但是此时gazebo是不会有模型的，因为他的地图文件是`.world`和`.sdf`），最后要**记得**将`maps`目录添加到cmake文件中进行安装，之后编译刷新环境，否则无法找到map文件加载，以及在这个情况下你的`map` -> `odom`转换需要手动发布（没错`amcl`不会给你发布这个tf），如果建图顺利的话，在nav模式下能看到
+![alt text](Image//image-10.png)
+
+#### 小建议
+写一个`full_navigation.launch.py`同时启动`gazebo_sim.launch.py`、`bringup_launch.py`、rviz配置文件（打开一个新的rviz，想要保存目前rviz的面板（配置），可以选左上角$\mathrm{File>Save~Config~as}$保存`.rviz`文件到`config`目录下（这个目录记得也要通过cmake安装），在后面的rviz配置启动文件可以填这个），可能还有`slam_toolbox`、静态`map` -> `odom`转换等
+这样能显著提升效率，至于选择分支可以用一个变量`slam_mode`判断选择slam模式还是nav模式，同时也要进行对不同模式下`.yaml`文件的区分，推荐使用`IfCondition/UnlessCondition`或`PythonExpression`库
