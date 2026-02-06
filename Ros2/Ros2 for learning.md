@@ -675,6 +675,91 @@ ros2 run rviz2 rviz2 -d $(ros2 pkg prefix --share turtle_tf2_py)/rviz/turtle_rvi
 右上角两个小箭头分别表示两只海龟，它们现在是重合的，中心原点的右上半正方形部分表示默认 turtlesim 窗口内的样子
 
 ### $\mathbf{Fast~DDS~Discovery~Server}$
+#### 简介
+FDDS协议是一种提供**集中式动态发现机制**的功能，早期ros使用多播的方式让节点之间连接，即当一个节点启动，它需要询问所有正在启动的节点来连接，如果节点很多，则会出现网络风暴，网络流量呈指数级暴涨
+为了解决这个问题，$\mathrm{eProsima}$开发了一种优化节点发现机制即FDDS
+![alt text](Image//image-8.png)
+这张图是两种方式的对比，FDDS机制在启动节点时，它只需要向服务器DS报告，就能连接其他节点
+后来在foxy版本后，FDDS进行了二版更新FDDSv2，这个版本包括了一个过滤器，它通过检测不同节点的topic来决定他们是否连接通信，进一步优化了性能损耗，如下是一个对比图
+![alt text](Image//image-9.png)
+默认情况下，如果没有配置DS，那么所有节点的启动都是多播（无论你是什么nav2项目还是gazebo启动的节点），只有配置了DS并设置了环境变量，所有的节点才会自动采用FDDS协议
+#### 使用
+在启动节点（或launch文件）之前，需要先配置一个DS，我们可以在新终端输入
+```bash
+fastdds discovery --server-id 0
+或者
+fastdds discovery --server-id 0 --ip-address 127.0.0.1 --port 11811
+```
+id为0的表明这是一个DS，ip地址默认`127.0.0.1`，端口默认是`11811`，但是建议使用
+```bash
+hostname -I
+```
+查询真实的ip地址
+随后使用
+```bash
+export ROS_DISCOVERY_SERVER=127.0.0.1:11811
+```
+设置环境变量，然后启动launch文件或者节点即可
+如果想写死在launch文件中，可以加入
+```py
+start_discovery_server = ExecuteProcess(
+    cmd=['fastdds', 'discovery', '--server-id', '0', '--port', '11811'],
+    output='screen'
+)
+os.environ['ROS_DISCOVERY_SERVER'] = '127.0.0.1:11811'
+```
+最后记得将`start_discovery_server`添加到启动列表里即可，如果想确认整个结构图，我们可以使用rqt来查看
+按理来说不export到ip你的`rqt_graph`是看不到节点的，但是如果你在本机电脑上测试，它会默认开启$\mathbf{Shared~Memory(SHM)}$通信，即绕过网络协议栈直接通过共享内存看到对方，同时如果你`ros2 node list`却没有任何节点显示，很可能是后台的$\mathbf{Daemon}$仍然是多播模式，它通过在后台悄悄运行记录所有节点，运行该命令后直接告诉它它所记录的节点，我们和只需要先
+```bash
+ros2 daemon stop
+```
+停止daemon，再启动`ros2 node list`就能看到所有节点了（一般来说不需要`ros2 daemon start`，因为会自动启动，如果失败可以再尝试手动启动，同理如果你的`rqt_graph`也看不到，也可以尝试这样后启动，启动后就会变成fdds模式了）
+我们还可以启动多个DS，具体只是id和端口上不同，这样如果其中一个DS出故障，仍然有机会可以继续通信，它们的尝试顺序就是按id顺序来的，例如
+```bash
+export ROS_DISCOVERY_SERVER="127.0.0.1:11811;127.0.0.1:11888"
+ros2 run demo_nodes_cpp talker --ros-args --remap __node:=talker_1
+```
+可以运行这个节点同时连接到两个服务器，用分号隔开，不在一个服务器的节点不会接受这一个服务器的消息
+如果需要，我们可以在启动DS的后面加上`--backup`表示这是一个备份服务器，以便保存数据下次快速启动
+
+#### ros2内省
+你会发现，启动了fdds后的`rqt_graph`的拓扑结构大有不同，所有节点只能看到与自己有关的通信拓扑，因为fdds协议牺牲了全局透明度换来了效率，它不允许所有节点与与自己无关的节点通信，所以`rqt_graph`获取到的拓扑结构就很稀少
+为了解决这个问题，fddsv2提供了一个**超级客户端**概念，简单来说我们可以把`rqt_graph`配制成超级客户端来监听全局，我们在使用$\mathbf{ROS2~CLI}$**内省工具**（就是`ros2 node list`那些）时，将它配置为超级客户端能监听全局节点和话题，具体来说我们需要写一个`super_client_configuration_file.xml`，在启动守护节点前加载配置
+```xml
+<?xml version="1.0" encoding="UTF-8" ?>
+<dds>
+    <profiles xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">
+        <participant profile_name="super_client_profile" is_default_profile="true">
+            <rtps>
+                <builtin>
+                    <discovery_config>
+                        <discoveryProtocol>SUPER_CLIENT</discoveryProtocol>
+                        <discoveryServersList>
+                            <RemoteServer prefix="44.53.00.5f.45.50.52.4f.53.49.4d.41">
+                                <metatrafficUnicastLocatorList>
+                                    <locator>
+                                        <udpv4>
+                                            <address>127.0.0.1</address>
+                                            <port>11811</port>
+                                        </udpv4>
+                                    </locator>
+                                </metatrafficUnicastLocatorList>
+                            </RemoteServer>
+                        </discoveryServersList>
+                    </discovery_config>
+                </builtin>
+            </rtps>
+        </participant>
+    </profiles>
+</dds>
+```
+随后在新终端输入
+```bash
+export FASTRTPS_DEFAULT_PROFILES_FILE=super_client_configuration_file.xml
+```
+将该终端配置为超级客户端，再刷新daemon即可使用ros2内省工具来监听节点和话题了
+*（注：这是humble版本的方法，jazzy版本未经过测试）*
+如果不想每次刷新daemon，可以在启动内省节点时加上参数`--no-daemon`来禁止其启动，内省节点就会直接通过配置环境加载
 
 ### $\mathrm{C++}环境$
 #### 创建与运行功能包
@@ -2991,8 +3076,6 @@ try {
 }
 ```
 这里的```.createSharedInstance```表示用共享指针实例化对象
-
-### 主题统计
 
 ### 部分$\mathrm{ROS~2}$语法
 对一个节点的```.cpp```或```.hpp```文件如果要让他派上用场首先需要导入库```rclcpp.hpp```，这是一个ros2的**基本函数库**，我们声明对应的类，且这个类应该继承```rclcpp::Node```，在类的构造函数中我们应顺便调用```Node```的构造函数，这个构造函数需要一个字符串参数，表示这个节点的名字
