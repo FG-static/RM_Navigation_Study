@@ -489,3 +489,217 @@ ros2 run nav2_map_server map_saver_cli -f map1
 #### 小建议
 写一个`full_navigation.launch.py`同时启动`gazebo_sim.launch.py`、`bringup_launch.py`、rviz配置文件（打开一个新的rviz，想要保存目前rviz的面板（配置），可以选左上角$\mathrm{File>Save~Config~as}$保存`.rviz`文件到`config`目录下（这个目录记得也要通过cmake安装），在后面的rviz配置启动文件可以填这个），可能还有`slam_toolbox`、静态`map` -> `odom`转换等
 这样能显著提升效率，至于选择分支可以用一个变量`slam_mode`判断选择slam模式还是nav模式，同时也要进行对不同模式下`.yaml`文件的区分，推荐使用`IfCondition/UnlessCondition`或`PythonExpression`库
+
+### $\mathbf{Nav2}$行为树
+#### 动作节点$-\mathbf{Action~Nodes}$
+作为动作客户端调用nav2的各个（动作）服务器
+- **`ComputePathToPose`**
+  规划器接口，用于计算两点之间的路径，如果可以计算出来，则返回`SUCCESS`，否则返回`FAILURE`
+- **`FollowPath`**
+  控制器接口，控制机器人沿着生成的路径移动，走完是`SUCCESS`，走时是`RUNNING`，装障或走丢返回`FAILURE`
+- **`Spin \ Wait \ BackUp`**
+  旋转、等待、后退，只有当机器人卡住时它们才会执行上面三个运动，在主任务失败时出来执行
+- **`ClearCostmapService`**
+  服务客户端，用于清除Costmap消除传感器留下来的虚假障碍物
+
+#### 条件节点$-\mathbf{Condition~Nodes}$
+监察系统状态，结果为`True`返回`SUCCESS`、为`False`返回`FAILURE`
+- **`GoalUpdated`**
+  监听目标话题用于更新机器人的目的地，可以即使更新在rviz上点出的新目标点
+- **`GoalReached`**
+  监听机器人为姿检测机器人目前的位置是否与目标点重合
+- **`IsBatteryLow`**
+  监听电池话题检测电量是否充足
+- **`InitialPoseReceived`**
+  检查是否收到了`initial_pose`话题上的位姿信息
+
+#### 装饰节点$-\mathbf{Decorator~Nodes}$
+用于约定子节点的运行频率和触发时机
+- **`RateController`**
+  限制子节点的每秒运行频率(tick)
+- **`DistanceController`**
+  限制机器人行走到足够的距离后再重新计算路径
+- **`GoalUpdater`**
+  通过BT端口（传到其他节点之前）更新目标位置（根据动态障碍物微调）
+- **`SpeedController`**
+  根据机器人的行驶速度调整子节点的运行频率(tick)
+- **`SingleTrigger`**
+  只运行一次的节点，第一个tick时，它会执行，正在执行返回`RUNNING`，完成了且成功了返回`SUCCESS`，完成后无论到达几个tick，都返回`FAILURE`
+
+#### 控制节点$-\mathbf{Control~Nodes}$
+- **`PipelineSequence`**
+  形象的说就是一个带顺序的并行运行节点，它允许每个子节点返回`SUCCESS`后执行下一个子节点，而当任何一个子节点返回`RUNNING`时，它都会重新tick之前的节点，保证顺序上节点的并行运行，如果某个节点返回`FAILURE`，它会杀死之后的所有任务，父节点（本身）返回`FAILURE`
+  为什么不用`Parallel`？因为它无法做到带**顺序**并行运行，例如`FollowPath`和`ComputePathToPose`，它们通常都是`PipelineSequence`下的两个子节点，前者必须依赖后者计算的路径，否则顺序不一致会发生错误
+- **`RecoveryNode`**
+  专门处理失败的情况，它有通常有两个节点，一个是主行为（如导航），如果返回了`FAILURE`代表失败了，则执行第二个子节点（如原地旋转），如果返回`SUCCESS`，重试主行为，如果主行为随后返回`SUCCESS`，父节点返回`SUCCESS`
+- **`RoundRobin`**
+  **轮询**方式tick子节点，知道某个子节点返回`SUCCESS`，它就会返回`SUCCESS`，否则返回`RUNNING`，如果所有子节点都返回`FAILURE`，那么就停止轮询
+
+如下是一个BT例图
+![alt text](Image//image-11.png)
+它在`.xml`中的代码是这样的
+```xml
+<root BTCPP_format="4" main_tree_to_execute="MainTree">
+    <BehaviorTree ID="MainTree">
+        <RecoveryNode number_of_retries="6" name="NavigateRecovery">
+            <PipelineSequence name="NavigateWithReplanning">
+                <ControllerSelector selected_controller="{selected_controller}" default_controller="FollowPath" topic_name="controller_selector"/>
+                <PlannerSelector selected_planner="{selected_planner}" default_planner="GridBased" topic_name="planner_selector"/>
+                <RateController hz="1.0">
+                    <RecoveryNode number_of_retries="1" name="ComputePathToPose">
+                        <ComputePathToPose goal="{goal}" path="{path}" planner_id="{selected_planner}" error_code_id="{compute_path_error_code}" error_msg="{compute_path_error_msg}"/>
+                        <Sequence>
+                            <WouldAPlannerRecoveryHelp error_code="{compute_path_error_code}"/>
+                            <ClearEntireCostmap name="ClearGlobalCostmap-Context" service_name="global_costmap/clear_entirely_global_costmap"/>
+                        </Sequence>
+                    </RecoveryNode>
+                </RateController>
+                <RecoveryNode number_of_retries="1" name="FollowPath">
+                    <FollowPath path="{path}" controller_id="{selected_controller}" error_code_id="{follow_path_error_code}" error_msg="{follow_path_error_msg}"/>
+                    <Sequence>
+                        <WouldAControllerRecoveryHelp error_code="{follow_path_error_code}"/>
+                        <ClearEntireCostmap name="ClearLocalCostmap-Context" service_name="local_costmap/clear_entirely_local_costmap"/>
+                    </Sequence>
+                </RecoveryNode>
+            </PipelineSequence>
+            <Sequence>
+                <Fallback>
+                    <WouldAControllerRecoveryHelp error_code="{follow_path_error_code}"/>
+                    <WouldAPlannerRecoveryHelp error_code="{compute_path_error_code}"/>
+                </Fallback>
+                <ReactiveFallback name="RecoveryFallback">
+                    <GoalUpdated/>
+                    <RoundRobin name="RecoveryActions">
+                        <Sequence name="ClearingActions">
+                        <ClearEntireCostmap name="ClearLocalCostmap-Subtree" service_name="local_costmap/clear_entirely_local_costmap"/>
+                        <ClearEntireCostmap name="ClearGlobalCostmap-Subtree" service_name="global_costmap/clear_entirely_global_costmap"/>
+                        </Sequence>
+                        <Spin spin_dist="1.57" error_code_id="{spin_error_code}" error_msg="{spin_error_msg}"/>
+                        <Wait wait_duration="5.0" error_code_id="{wait_error_code}" error_msg="{wait_error_msg}"/>
+                        <BackUp backup_dist="0.30" backup_speed="0.15" error_code_id="{backup_error_code}" error_msg="{backup_error_msg}"/>
+                    </RoundRobin>
+                </ReactiveFallback>
+            </Sequence>
+        </RecoveryNode>
+    </BehaviorTree>
+</root>
+```
+主要包括两个主子树：导航子树和恢复子树
+我们应保证整个行为树的大部分时间都在导航子树上，只有导航子树返回`FAILURE`才执行恢复子树，直到重试恢复子树的次数超过6（代码中的`number_of_retries="6"`来决定）
+其中的`ReactiveFallback`控制系统范围内其余恢复之间的流程，并异步检查是否收到新目标，如果在任何时候目标更新，它将停止所有子节点返回`SUCCESS`
+
+#### $\mathbf{Groot2}$
+去 https://www.behaviortree.dev/groot 即groot2官网下载其`.AppImage`版，变为可执行程序后启动
+我们可以通过小车ip和端口用groot连接到nav2服务器上，来监视整个行为树
+它同时也是一个bt的可视化编辑器，我们可以用它来编辑一些`.xml`文件来构造行为树（随写随存）
+我们可以将这些`.xml`放到功能包的`behavior_trees`目录下（你可以选择在之后的cmake中安装该目录）
+我们在打开文件前可能需要先在`Model`栏目选择`Import Models from file`倒入一棵bt需要的所有nav2节点
+在编辑好一个文件后，如果想要让小车遵循该行为树，我们需要在`nav2_params.yaml`中的`bt_navigator`中的`ros__parameters`添加
+```xml
+default_nav_to_pose_bt_xml: "/home/goose/nav2_test/src/my_nav2_robot/behavior_trees/test_nav.xml
+```
+后面的路径可以是绝对路径，也可以是相对路径（如果你在cmake文件中添加了安装这个文件夹的代码），这样小车就会使用这个文件编写的bt了（如果不填使用一个默认bt文件）
+例如一个`test_nav.yaml`
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<root BTCPP_format="4"
+      main_tree_to_execute="MainTree">
+  <BehaviorTree ID="MainTree">
+    <RecoveryNode name="NavigateRecovery"
+                  number_of_retries="6">
+      <PipelineSequence name="NavigateWithReplanning">
+        <RateController hz="20.0">
+          <RecoveryNode name="ComputePathToPose"
+                        number_of_retries="1">
+            <ComputePathToPose goal="{goal}"
+                               path="{path}"
+                               planner_id="GridBased"/>
+            <ClearEntireCostmap name="ClearGlobalCostmap-Context"
+                                service_name="global_costmap/clear_entirely_global_costmap"/>
+          </RecoveryNode>
+        </RateController>
+        <FollowPath path="{path}"
+                    controller_id="FollowPath"/>
+      </PipelineSequence>
+      <ReactiveFallback name="RecoveryFallback">
+        <GoalUpdated/>
+        <Sequence name="StuckRecovery">
+          <BackUp backup_dist="0.2"
+                  backup_speed="0.05"/>
+          <ClearEntireCostmap name="ClearLocalCostmap-Subtree"
+                              service_name="local_costmap/clear_entirely_local_costmap"/>
+          <Wait wait_duration="2.0"/>
+        </Sequence>
+      </ReactiveFallback>
+    </RecoveryNode>
+  </BehaviorTree>
+
+  <!-- Description of Node Models (used by Groot) -->
+  <TreeNodesModel>
+    <Action ID="BackUp"
+            editable="true">
+      <input_port name="backup_dist"/>
+      <input_port name="backup_speed"/>
+    </Action>
+    <Action ID="ClearEntireCostmap"
+            editable="true">
+      <input_port name="service_name"/>
+    </Action>
+    <Action ID="ComputePathToPose"
+            editable="true">
+      <input_port name="goal"/>
+      <input_port name="path"/>
+      <input_port name="planner_id"/>
+    </Action>
+    <Action ID="FollowPath"
+            editable="true">
+      <input_port name="path"/>
+      <input_port name="controller_id"/>
+    </Action>
+    <Action ID="GoalUpdated"
+            editable="true"/>
+    <Control ID="PipelineSequence"
+             editable="true"/>
+    <Decorator ID="RateController"
+               editable="true">
+      <input_port name="hz"/>
+    </Decorator>
+    <Control ID="RecoveryNode"
+             editable="true">
+      <input_port name="number_of_retries"/>
+    </Control>
+    <Action ID="Wait"
+            editable="true">
+      <input_port name="wait_duration"/>
+    </Action>
+  </TreeNodesModel>
+
+</root>
+```
+在groot2里应该是这样的
+![alt text](Image//image-12.png)
+groot2还有添加自定义节点和导出项目的功能
+
+### 路径规划算法
+#### $\mathbf{Dynamic~Window~Approach-DWA}$
+dwa算法一共有三个步骤
+- 设计动态窗口
+- 轨迹推算
+- 优化组合计算
+
+##### 设计动态窗口
+动态窗口实际上是一个速度范围，用于约束机器人在短时间内安全到达目标点的$v$和$\omega$，它定义了一个速度空间$V_d$的子集$D_{dw}$，其中
+$$ V_d = \{ (v,\omega) | v \in [ v_c - \dot{v} \Delta t, v_c + \dot{v} \Delta t ], \omega \in [ \omega_c - \dot{ \omega } \Delta t, \omega_c + \dot{ \omega } \Delta t ] \} $$
+$ v_c $ 和 $ \omega_c $ 是当前的线速度和角速度，同时$D_{dw}$内的元素还应保证是安全速度（即遇到障碍物有充足的时间改变以致于不会撞上）
+
+##### 轨迹推算
+我们对$D_{dw}$内的每一组元素都进行未来一小段时间内的推演（速度不变），得到它的轨迹（应该是圆弧线），随后记录所有在轨迹末端时刻的点的位姿
+
+##### 优化组合计算
+接下来就是对每一组$D_{dw}$内的元素根据它们在未来轨迹末端时刻的点的位姿进行打分，分数最高的组合就是我们要选择的速度组合，记每一组元素的得分为$ G(v,\omega) $，其公式为：
+$$ G( v, \omega ) = \alpha \cdot \mathrm{heading}( v, \omega ) + \beta \cdot \mathrm{dist}( v, \omega ) + \gamma \cdot \mathrm{vel}( v, \omega ) $$
+其中$ \mathrm{heading}( v, \omega ),\mathrm{dist}( v, \omega ),\mathrm{vel}( v, \omega ) $分别为朝向权重、障碍物距离权重、线速度权重
+而$\alpha$为轨迹末端时刻的朝向与目标点方向的差角的绝对值，$\beta$为轨迹末端时刻与最近障碍物的距离，$\gamma$为轨迹末端时刻的线速度的大小
+
+##### 综合
+将这三个步骤实现即可，需要注意的事项就是权重的选择，应选择合适的权重来达到最好的效果，同时dwa算法容易陷入局部最优，即可能会在一个凹形障碍物前不断磕碰，优点也是计算量小简单易懂实现简单
