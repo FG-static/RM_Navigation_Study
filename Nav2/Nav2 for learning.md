@@ -680,7 +680,7 @@ default_nav_to_pose_bt_xml: "/home/goose/nav2_test/src/my_nav2_robot/behavior_tr
 ![alt text](Image//image-12.png)
 groot2还有添加自定义节点和导出项目的功能
 
-### 路径规划算法
+### 局部路径规划算法
 #### $\mathbf{Dynamic~Window~Approach-DWA}$
 dwa算法一共有三个步骤
 - 设计动态窗口
@@ -703,3 +703,465 @@ $$ G( v, \omega ) = \alpha \cdot \mathrm{heading}( v, \omega ) + \beta \cdot \ma
 
 ##### 综合
 将这三个步骤实现即可，需要注意的事项就是权重的选择，应选择合适的权重来达到最好的效果，同时dwa算法容易陷入局部最优，即可能会在一个凹形障碍物前不断磕碰，优点也是计算量小简单易懂实现简单
+
+##### 实践
+我们用
+```bash
+ros2 pkg create --build-type ament_cmake my_nav2_controller --dependencies nav2_core pluginlib rclcpp
+```
+创建一个新的功能包`my_dwa_controller`在工作空间下，里面写我们实现的dwa算法
+准备两个文件`dwa_controller.cpp`和`dwa_controller.hpp`，假设我们已经写好：
+`dwa_controller.hpp`:
+```cpp
+#ifndef MY_NAV2_CONTROLLER__DWA_CONTROLLER
+#define MY_NAV2_CONTROLLER__DWA_CONTROLLER
+
+#include <memory>
+#include <string>
+#include <vector>
+
+#include "nav2_core/controller.hpp"
+#include "rclcpp/rclcpp.hpp"
+#include "nav_msgs/msg/path.hpp"
+#include "geometry_msgs/msg/twist_stamped.hpp"
+#include "nav2_costmap_2d/costmap_2d_ros.hpp"
+#include "nav2_util/node_utils.hpp"
+
+namespace my_nav2_controller {
+
+    class MyDWAController : public nav2_core::Controller {
+
+    public:
+
+        MyDWAController() = default;
+        ~MyDWAController() override = default;
+
+        /**
+         * @brief 初始化插件
+         * @param parent 生命周期节点
+         * @param name 加载的插件的名称
+         * @param tf 用于检查变换
+         * @param costmap_ros 代价地图
+         * @return 无
+         */
+        void configure(
+            const rclcpp_lifecycle::LifecycleNode::WeakPtr &parent,
+            std::string name, std::shared_ptr<tf2_ros::Buffer> tf,
+            std::shared_ptr<nav2_costmap_2d::Costmap2DROS> costmap_ros) override;
+        
+        void activate() override;
+        void deactivate() override;
+        void cleanup() override;
+
+        /**
+         * @brief 接受规划器传来的路径
+         * @param path 路径消息
+         * @return 无
+         */
+        void setPlan(const nav_msgs::msg::Path &path) override;
+
+        void setSpeedLimit(const double &speed_limit, const bool &percentage) override;
+
+        /**
+         * @brief 计算下达给底盘的速度（但不是直接下达给底盘）
+         * @param pose 带时间戳的小车位姿
+         * @param v 目前小车的速度
+         * @param goal_checker 到达目标点检测
+         * @return 带时间戳的运动向量类型
+         */
+        geometry_msgs::msg::TwistStamped computeVelocityCommands(
+            const geometry_msgs::msg::PoseStamped &pose,
+            const geometry_msgs::msg::Twist &v,
+            nav2_core::GoalChecker *goal_checker) override;
+    protected:
+        
+        double cal_score(double v, double w);
+        double cal_diff_angle(double inialp, double goalalp);
+
+        rclcpp_lifecycle::LifecycleNode::WeakPtr node_;
+        std::shared_ptr<nav2_costmap_2d::Costmap2DROS> costmap_ros_;
+        std::shared_ptr<tf2_ros::Buffer> tf_;
+        rclcpp::Logger logger_{rclcpp::get_logger("MyDWAController")};
+        rclcpp::Clock::SharedPtr clock_;
+        nav_msgs::msg::Path global_plan_;
+        std::string plugin_name_;
+
+        // DWA参数
+        double alpha, beta, gamma; // heading distance velocity分权重
+        double lookahead_dist; // 诱饵点
+        double max_v; // 最大速度
+        double max_w;
+        double lim_a; // 加速度限制
+        double lim_aw;
+        double sim_time_; // 未来时间
+        rclcpp::Duration transform_tolerance_{0, 0};
+    };
+}
+
+#endif // MY_NAV2_CONTROLLER__DWA_CONTROLLER
+```
+`dwa_controller.cpp`:
+```cpp
+#include "my_nav2_controller/dwa_controller.hpp"
+#include "nav2_core/controller_exceptions.hpp"
+#include "pluginlib/class_list_macros.hpp"
+#include "nav2_util/node_utils.hpp"
+
+using nav2_util::declare_parameter_if_not_declared;
+
+namespace my_nav2_controller {
+
+    struct Path {
+        double v, w,      // 速度组合
+            score,        // 总评分
+            cost,         // 障碍物代价
+            dist_to_path; // 距离全局路径的距离
+    };
+
+    void MyDWAController::configure(
+        const rclcpp_lifecycle::LifecycleNode::WeakPtr &parent,
+        std::string name, std::shared_ptr<tf2_ros::Buffer> tf,
+        std::shared_ptr<nav2_costmap_2d::Costmap2DROS> costmap_ros) {
+        
+        node_ = parent;
+        auto node = node_.lock();
+        tf_ = tf;
+        plugin_name_ = name;
+        costmap_ros_ = costmap_ros;
+        logger_ = node->get_logger();
+        clock_ = node->get_clock();
+        
+        declare_parameter_if_not_declared(
+            node, plugin_name_ + ".alpha", rclcpp::ParameterValue(2.0)
+        );
+        declare_parameter_if_not_declared(
+            node, plugin_name_ + ".beta", rclcpp::ParameterValue(1.5)
+        );
+        declare_parameter_if_not_declared(
+            node, plugin_name_ + ".gamma", rclcpp::ParameterValue(1.0)
+        );
+        declare_parameter_if_not_declared(
+            node, plugin_name_ + ".lookahead_dist", rclcpp::ParameterValue(0.8)
+        );
+        declare_parameter_if_not_declared(
+            node, plugin_name_ + ".max_v", rclcpp::ParameterValue(0.5)
+        );
+        declare_parameter_if_not_declared(
+            node, plugin_name_ + ".max_w", rclcpp::ParameterValue(1.0)
+        );
+        declare_parameter_if_not_declared(
+            node, plugin_name_ + ".lim_a", rclcpp::ParameterValue(2.5)
+        );
+        declare_parameter_if_not_declared(
+            node, plugin_name_ + ".lim_aw", rclcpp::ParameterValue(3.2)
+        );
+        declare_parameter_if_not_declared(
+            node, plugin_name_ + ".sim_time", rclcpp::ParameterValue(1.5)
+        );
+        declare_parameter_if_not_declared(
+            node, plugin_name_ + ".transform_tolerance", rclcpp::ParameterValue(0.1)
+        );
+
+        // 获取参数
+        node->get_parameter(plugin_name_ + ".alpha", alpha);
+        node->get_parameter(plugin_name_ + ".beta", beta);
+        node->get_parameter(plugin_name_ + ".gamma", gamma);
+        node->get_parameter(plugin_name_ + ".lookahead_dist", lookahead_dist);
+        node->get_parameter(plugin_name_ + ".max_v", max_v);
+        node->get_parameter(plugin_name_ + ".max_w", max_w);
+        node->get_parameter(plugin_name_ + ".lim_a", lim_a);
+        node->get_parameter(plugin_name_ + ".lim_aw", lim_aw);
+        node->get_parameter(plugin_name_ + ".sim_time", sim_time_);
+
+        double transform_tolerance;
+        node->get_parameter(plugin_name_ + ".transform_tolerance", transform_tolerance);
+        transform_tolerance_ = rclcpp::Duration::from_seconds(transform_tolerance);
+
+        RCLCPP_INFO(logger_, "自定义DWA控制器配置完成");
+    }
+     
+    void MyDWAController::setPlan(const nav_msgs::msg::Path &path) {
+
+        global_plan_ = path;
+    }
+
+    /**
+     * @brief 以逆时针为正方向计算初始角到目标角的差角
+     * @param inialp 初始角
+     * @param goalalp 目标角
+     * @return 一个double值
+     */
+    double MyDWAController::cal_diff_angle(double inialp, double goalalp) {
+
+        double raw_diff_angle = goalalp - inialp;
+        while (raw_diff_angle > M_PI) raw_diff_angle -= 2 * M_PI;
+        while (raw_diff_angle < -M_PI) raw_diff_angle += 2 * M_PI;
+        return raw_diff_angle;
+    }
+
+    geometry_msgs::msg::TwistStamped MyDWAController::computeVelocityCommands(
+        const geometry_msgs::msg::PoseStamped & pose,
+        const geometry_msgs::msg::Twist & velocity,
+        nav2_core::GoalChecker *goal_checker) {
+
+        auto node = node_.lock();
+        auto costmap = costmap_ros_->getCostmap();
+
+        // 设定诱饵点
+        geometry_msgs::msg::PoseStamped target_pose;
+        bool found_target = false;
+
+        // 获取机器人位置
+        double r_x = pose.pose.position.x,
+            r_y = pose.pose.position.y,
+            r_yaw = tf2::getYaw(pose.pose.orientation);
+
+        // 遍历路径
+        for (const auto &p : global_plan_.poses) {
+
+            double dx = p.pose.position.x - r_x,
+                dy = p.pose.position.y - r_y;
+            if (std::hypot(dx, dy) >= lookahead_dist) {
+
+                target_pose = p;
+                found_target = true;
+                break;
+            }
+        }
+        if (!found_target && !global_plan_.poses.empty()) {
+
+            target_pose = global_plan_.poses.back();
+        }
+        // 计算到诱饵点的角度
+        double target_yaw = std::atan2(target_pose.pose.position.y - r_y,
+                                 target_pose.pose.position.x - r_x);
+
+        // 动态窗口
+        double dt = 0.1,
+            v_min = std::max(0.0, velocity.linear.x - lim_a * dt),
+            v_max = std::min(max_v, velocity.linear.x + lim_a * dt),
+            w_min = velocity.angular.z - lim_aw * dt,
+            w_max = velocity.angular.z + lim_aw * dt;
+
+        Path best_path = {0.0, 0.0, -1e9, 0.0, 0.0};
+
+        // 采样循环
+        for (double v = v_min; v <= v_max; v += 0.02) {
+
+            for (double w = w_min; w <= w_max; w += 0.1) {
+
+                double x = 0.0, y = 0.0, alp = r_yaw;
+                bool collided = false;
+                double min_dist_to_path = 1e9;
+
+                for (double t = 0; t < sim_time_; t += 0.2) {
+
+                    x += v * cos(alp) * 0.2;
+                    y += v * sin(alp) * 0.2;
+                    alp += w * 0.2;
+                    unsigned int mx, my;
+                    // 地图内判断
+                    if (costmap_ros_->getCostmap()->worldToMap(x + r_x, y + r_y, mx, my)) {
+
+                        // 获取代价
+                        unsigned char cost = costmap->getCost(mx, my);
+                        if (cost >= nav2_costmap_2d::INSCRIBED_INFLATED_OBSTACLE) { // 撞墙了
+
+                            collided = true;
+                            break;
+                        }
+                        double dist_score_temp = (255.0 - cost) / 255.0; // 归一化
+                        if (dist_score_temp < min_dist_to_path) {
+
+                            // 代价越小，距离越大
+                            min_dist_to_path = dist_score_temp;
+                        }
+                    }
+                }
+
+                if (collided) continue;
+                // 评分
+                // Heading
+                double diff_angle = std::abs(cal_diff_angle(alp, target_yaw)),
+                    heading_score = (M_PI - diff_angle) / M_PI;
+                
+                // Distance
+                double distance_score = min_dist_to_path;
+
+                // Velocity
+                double velocity_score = v / max_v;
+                double score = alpha * heading_score +
+                               beta * distance_score +
+                               gamma * velocity_score;
+                if (score > best_path.score) best_path = {v, w, score, 0.0, 0.0};
+            }
+        }
+        
+        geometry_msgs::msg::TwistStamped cmd_vel;
+        cmd_vel.header.stamp = clock_->now();
+        cmd_vel.header.frame_id = "base_link";
+        cmd_vel.twist.linear.x = best_path.v;
+        cmd_vel.twist.angular.z = best_path.w;
+
+        return cmd_vel;
+    }
+    void MyDWAController::activate() { RCLCPP_INFO(logger_, "插件已激活"); }
+    void MyDWAController::deactivate() { RCLCPP_INFO(logger_, "插件已停用"); }
+    void MyDWAController::cleanup() { RCLCPP_INFO(logger_, "插件已清理"); }
+    void MyDWAController::setSpeedLimit(const double & speed_limit, const bool & percentage) {
+        
+        (void)speed_limit;
+        (void)percentage;
+        RCLCPP_INFO(logger_, "收到限速指令，当前插件尚未实现具体的限速逻辑");
+    }
+} // my_nav2_controller
+
+// 注册算法插件
+PLUGINLIB_EXPORT_CLASS(my_nav2_controller::MyDWAController, nav2_core::Controller)
+```
+之后我们编写`CMakeLists.txt`，它应该包含需要的依赖、安装需要的文件、导出所需要的依赖供其他包使用、编译动态库，还需要使用
+```c
+pluginlib_export_plugin_description_file(nav2_core plugins.xml)
+```
+导出插件描述文件，以便我们能正常加载我们的插件，这是一个完整的cmake文件：
+```c
+cmake_minimum_required(VERSION 3.8)
+project(my_nav2_controller)
+
+if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+  add_compile_options(-Wall -Wextra -Wpedantic)
+endif()
+
+# find dependencies
+find_package(ament_cmake REQUIRED)
+find_package(nav2_core REQUIRED)
+find_package(nav2_util REQUIRED)
+find_package(nav2_costmap_2d REQUIRED)
+find_package(pluginlib REQUIRED)
+find_package(rclcpp REQUIRED)
+find_package(rclcpp_lifecycle REQUIRED)
+find_package(geometry_msgs REQUIRED)
+find_package(nav_msgs REQUIRED)
+find_package(tf2 REQUIRED)
+find_package(tf2_ros REQUIRED)
+find_package(angles REQUIRED)
+
+# 添加头文件目录
+include_directories(include)
+
+# 编译动态库 (Shared Library)
+add_library(${PROJECT_NAME}_lib SHARED
+  src/dwa_controller.cpp
+)
+
+ament_target_dependencies(${PROJECT_NAME}_lib
+  nav2_core
+  nav2_util
+  nav2_costmap_2d
+  pluginlib
+  rclcpp
+  rclcpp_lifecycle
+  geometry_msgs
+  nav_msgs
+  tf2
+  tf2_ros
+  angles
+)
+
+pluginlib_export_plugin_description_file(nav2_core plugins.xml)
+
+install(TARGETS ${PROJECT_NAME}_lib
+  ARCHIVE DESTINATION lib
+  LIBRARY DESTINATION lib
+  RUNTIME DESTINATION bin
+)
+
+install(DIRECTORY include/
+  DESTINATION include/
+)
+
+# 导出依赖以供其他包使用
+ament_export_include_directories(include)
+ament_export_libraries(${PROJECT_NAME}_lib)
+ament_export_dependencies(nav2_core nav2_util pluginlib rclcpp)
+
+if(BUILD_TESTING)
+  find_package(ament_lint_auto REQUIRED)
+  # the following line skips the linter which checks for copyrights
+  # comment the line when a copyright and license is added to all source files
+  set(ament_cmake_copyright_FOUND TRUE)
+  # the following line skips cpplint (only works in a git repo)
+  # comment the line when this package is in a git repo and when
+  # a copyright and license is added to all source files
+  set(ament_cmake_cpplint_FOUND TRUE)
+  ament_lint_auto_find_test_dependencies()
+endif()
+
+ament_package()
+```
+同时这里提到的`plugins.xml`也是需要写的，位于与`package.xml`同级的位置：
+```xml
+<library path="my_nav2_controller_lib">
+  <class name="my_nav2_controller/MyDWAController" 
+         type="my_nav2_controller::MyDWAController" 
+         base_class_type="nav2_core::Controller">
+    <description>
+      这是一个手动实现的简单DWA局部路径规划器插件。
+    </description>
+  </class>
+</library>
+```
+注意这里的`name`就是我们加载插件时需要填的，该文件用于描述插件
+以及`package.xml`我们需要把所有用到的依赖全都写上：
+```xml
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>my_nav2_controller</name>
+  <version>0.0.0</version>
+  <description>TODO: Package description</description>
+  <maintainer email="meis38@126.com">goose</maintainer>
+  <license>TODO: License declaration</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>nav2_core</depend>
+  <depend>nav2_util</depend>
+  <depend>nav2_costmap_2d</depend>
+  <depend>pluginlib</depend>
+  <depend>rclcpp</depend>
+  <depend>rclcpp_lifecycle</depend>
+  <depend>geometry_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>tf2</depend>
+  <depend>tf2_ros</depend>
+  <depend>angles</depend>
+
+  <test_depend>ament_lint_auto</test_depend>
+  <test_depend>ament_lint_common</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
+```
+随后我们可以复制一份`nav2_params_nav.yaml`改名为`nav2_params_nav_diy.yaml`，我们主要将`FollowPath`的算法改成我们手写的dwa算法（官方使用mppi算法），改完后`controller_server`部分代码如下：
+```py
+FollowPath:
+  plugin: "my_nav2_controller/MyDWAController"
+  alpha: 2.0
+  beta: 1.5
+  gamma: 1.0
+  lookahead_dist: 0.8
+  max_v: 0.5
+  max_w: 1.0
+  lim_a: 2.5
+  lim_aw: 3.2
+  sim_time: 1.5
+  transform_tolerance: 0.1
+  goal_checker_plugin: "general_goal_checker"
+  progress_checker_plugin: "progress_checker"
+```
+我们修改对应的launch文件中调用这个文件的参数名，重新编译整个包刷新环境后正常运行launch文件就能使用上我们自己写的dwa算法了
+
+#### 
