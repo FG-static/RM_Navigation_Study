@@ -141,7 +141,7 @@ $$\bold{T}^{-1}=\begin{bmatrix}
   a_1 \\
   a_2 \\
   a_3
-\end{bmatrix}$的**反对称矩阵**
+\end{bmatrix}$的**反对称矩阵**，用$^\lor$符号则可表示反对称矩阵对应的向量
 我们注意到，虽然$\bold{R}$能通过两组基来描述两个基坐标系之间的旋转变换，但是我们也可以设一个三维向量$\bold{n}$用$\theta\bold{n}$描述旋转轴为$\bold{n}$旋转角度为$\theta$的旋转变换（默认按右手定则），我们可以从**罗德里格斯公式**$(\mathrm{Rodrigues's~Formula})$：
 $$\bold{R}=\cos\theta\bold{I}+(1-\cos\theta)\bold{nn}^T+\sin\theta\bold{n}^\land$$
 得到旋转矩阵和旋转向量之间的转换公式，同时如果我们两边同时**求迹**，能得到角度的求解公式：
@@ -234,3 +234,100 @@ $$\begin{cases}
 **李群**是指具有连续（光滑）性质的群，$\mathrm{SO}(n)$和$\mathrm{SE}(n)$在实数空间上连续，它们都是李群，我们先从李代数入手再引出李群
 
 #### 李代数
+##### 引入
+考虑旋转矩阵$\bold{R}$，假设它是总随时间变化的一个函数$\bold{R}(t)$，那么根据旋转矩阵性质应有$$\bold{R}(t) \bold{R}(t)^T = \bold{I}$$
+两边分别对时间求导可得
+$$\dot{ \bold{R} }(t) \bold{R}(t)^T + \bold{R}(t) \dot{ \bold{R} }(t)^T = 0$$
+这表示$\dot{\bold{R}}(t) \bold{R}(t)^T$是一个反对称矩阵，所以我们可以找到一个向量$\phi (t)\in \mathbb{R}^3$与之对应：
+$$\dot{ \bold{R} }(t) \bold{R}(t)^T = \phi (t)^\land$$
+左右同乘$\bold{R}(t)$有：
+$$\dot{ \bold{R} }(t) = \phi (t)^\land \bold{R}(t) = \begin{bmatrix}
+  0 & -\phi_3 & \phi_2 \\
+  \phi_3 & 0 & -\phi_1 \\
+  -\phi_2 & \phi_1 & 0
+\end{bmatrix} \bold{R}(t)$$
+也就是说旋转矩阵求一次导相当于左乘一个$\phi^\land(t)$矩阵，设$\bold{R}(0) = \bold{I}$，我们可以在$t = 0$时进行一价**泰勒展开**：
+$$\bold{R}(t) \approx \bold{R}(t) + \dot{ \bold{R} }(t_0)(t - t_0)=\bold{I} + \phi(t_0)^\land (t)$$
+这里$\phi(t_0)$仍用$t_0$的原因只是为了表明这个旋转不是从0时刻开始而是从$t_0$时刻开始，即描述从$t_k$到$t_{k+1}$时刻的变化，我们称此时$\phi$在$\mathrm{SO}(3)$原点附近的**正切空间**上，同时在$t_0$附近我们可以令$\phi(t_0) = \phi_0$为常数，那么就有
+$$\dot{ \bold{R} }(t) = \phi^\land_0 \bold{R}(t)$$
+这是一个微分方程，容易解得：
+$$\bold{R}(t) = e^{\phi^\land_0 t}$$
+说明在0附近旋转矩阵还可由这个公式计算
+
+##### $\mathfrak{so}(3)$
+每个李群都有对应的李代数，它描述了李群在单位元附近的正切空间的性质，一般李代数定义如下：
+李代数由一个集合$\mathbb{V}$、一个数域$\mathbb{F}$和一个二元运算$[,]$组成，如果满足以下性质则称$(\mathbb{V}, \mathbb{F}, [,])$为一个李代数，称为$\mathfrak{g}$
+- 封闭性：$\forall \bold{X, Y} \in \mathbb{V},~[\bold{X, Y}] \in \mathbb{V}$
+- 双线性：$\forall \bold{X, Y, Z} \in \mathbb{V},~a, b \in \mathbb{F}$，有
+$$[a\bold{X} + b\bold{Y}, \bold{Z}] = a[\bold{X, Z}] + b[\bold{Y, Z}],~[\bold{Z}, a\bold{X} + b\bold{Y}] = a[\bold{Z, X}] + b[\bold{Z, Y}]$$
+- 自反性：$\forall \bold{X} \in \mathbb{V},~[\bold{X, X}] = 0$
+- 雅可比等价：$\forall \bold{X, Y, Z} \in \mathbb{V},~[\bold{X}, [\bold{Y, Z}]] + [\bold{Z}, [\bold{X, Y}]] + [\bold{Y}, [\bold{Z, Y}]] = 0$
+
+其中二元运算也被称作**李括号**，实际上三维向量$\mathbb{R}^3$上的叉积也是一种李代数，因此$\mathfrak{g} = (\mathbb{R}^3, \mathbb{R}, \times)$构成了一个李代数（第四条性质可用**拉格朗日公式**也称$\mathrm{BAC-CAB}$公式推导）
+实际上之前提到的$\phi$也是一个李代数，$\mathrm{SO}(3)$对应的李代数是定义在$\mathbb{R}^3$上的向量，每个$\phi$都可生成一个反对称矩阵：
+$$\Phi = \phi^\land = \begin{bmatrix}
+  0 & -\phi_3 & \phi_2 \\
+  \phi_3 & 0 & -\phi_1 \\
+  -\phi_2 & \phi_1 & 0
+\end{bmatrix} \in \mathbb{R}^{3 \times 3}$$
+在此定义下，两个向量的李括号为：
+$$[\phi_1, \phi_2] = (\Phi_1 \Phi_2 - \Phi_2 \Phi_1)^\lor$$
+易验证知其满足李代数性质，我们称$\mathfrak{so}(3)$的元素是三维向量或三维反对称矩阵（因为一一对应）：
+$$\mathfrak{so}(3) = \begin{Bmatrix}
+  \phi \in \mathbb{R}^3, \Phi = \phi^\land \in \mathbb{R}^{3 \times 3}
+\end{Bmatrix}$$
+我们可以利用指数映射用$\mathfrak{so}(3)$表示$\mathrm{SO}(3)$的旋转矩阵
+
+##### $\mathfrak{se}(3)$
+对于$\mathrm{SE}(3)$它也有对应的$\mathfrak{se}(3)$：
+$$\mathfrak{se}(3) = \begin{Bmatrix}
+  \xi = \begin{bmatrix}
+    \rho \\
+    \phi
+  \end{bmatrix} \in \mathbb{R}^6, \rho \in \mathbb{R}^3, \phi \in \mathfrak{so}(3),\xi^\land = \begin{bmatrix}
+    \phi ^ \land & \rho \\
+    \bold{0}^T & 0
+  \end{bmatrix} \in \mathbb{R}^{4 \times 4}
+\end{Bmatrix}$$
+在这里符号$^\land$和$^\lor$并不是向量到反对称矩阵和反对称矩阵到向量的关系，仅仅是向量到矩阵矩阵到向量的关系，虽然在这里$\rho$还不是平移向量，但可以先当作平移向量理解，$\xi$的李括号是：
+$$[\xi_1, \xi_2] = (\xi^\land_1 \xi^\land_2 - \xi^\land_2 \xi^\land_1)^\lor$$
+
+#### 指对映射
+##### $\mathfrak{so}(3)$
+我们先对矩阵的指数映射下定义：
+$$e^{ \bold{A} } = \sum \limits_{n = 0}^{\infin} \cfrac{1}{n!} \bold{A}^n$$
+结果仍是矩阵（如果公式收敛），这个公式并不好计算，我们可以使用
+$$\begin{cases}
+  \bold{a}^\land \bold{a}^\land = \begin{bmatrix}
+    -a^2_2 - a^2_3 & a_1a_2 & a_1a_3 \\
+    a_1a_2 & -a^2_1 - a^2_3 & a_2a_3 \\
+    a_1a_3 & a_2a_3 & -a^2_1 - a^2_2
+  \end{bmatrix} = \bold{aa}^T - \bold{I} \\
+  \bold{a}^\land \bold{a}^\land \bold{a}^\land = \bold{a}^\land(\bold{aa}^T - \bold{I}) = -\bold{a}^\land
+\end{cases}$$
+将上述公式转化为罗德里格斯公式，也就是说$\mathfrak{so}(3)$实际上是由旋转向量组成的空间，指数映射即所谓的罗德里格斯公式
+反之我们也可以定义对数映射从$\mathrm{SO}(3)$到$\mathfrak{so}(3)$：
+$$\phi = \ln( \bold{R} )^\lor = \left[ \sum\limits_{n = 0}^{\infin} \cfrac{ (-1)^n }{n+1} (\bold{R} - \bold{I})^{n + 1} \right]^\lor$$
+直接计算当然不现实，我们设$\theta$和$\bold{n}$分别是$\phi$的旋转角度和旋转轴向量使用以下公式：
+$$\begin{cases}
+  \theta = \arccos\cfrac{\mathrm{tr}(\mathbf{R}) - 1}{2} \\
+  \mathbf{R} = \cos\theta \mathbf{I} + (1 - \cos\theta)\mathbf{n}\mathbf{n}^T + \sin\theta \mathbf{n}^\wedge 
+\end{cases}$$
+就能计算出$\bold{R} - \bold{R}^T$进一步算出$\phi = \theta \bold{n}$即
+$$\phi = \cfrac{\theta}{ 2\sin \theta }(\bold{R} - \bold{R}^T)^\lor$$
+注意奇异点的计算即可
+
+##### $\mathfrak{se}(3)$
+$\mathfrak{se}(3)$上的指对映射也能类似推导，其指数映射形式为：
+$$e^{\xi^\land} \triangleq \begin{bmatrix}
+  \bold{R} & \bold{J}\rho \\
+  \bold{0}^T & 1
+\end{bmatrix} = \bold{T}$$
+其中$\sum\limits_{n = 0}^{\infin} \cfrac{(\phi^\land)^n}{ (n + 1)! } = \cfrac{\sin \theta}{\theta} \bold{I} + (1 - \cfrac{\sin \theta}{\theta}) \bold{nn}^T + \cfrac{1 - \cos \theta}{\theta}\bold{n} ^ \land = \bold{J} $
+而对数映射需要$\xi = \begin{bmatrix}
+  \rho \\
+  \phi
+\end{bmatrix}$，第二个分量我们在$\mathfrak{so}(3)$的对数映射已经求了，重点是第一个分量，观察$\bold{T}$能得到$\rho = \bold{J}^{-1}\bold{t}$，我们已经通过$\theta$得到了$\bold{J}$，只需求解$\bold{J}^{-1}$即可：
+$$\boldsymbol{J}^{-1} = \frac{\theta}{2}\cot\frac{\theta}{2}\boldsymbol{I} + (1 - \frac{\theta}{2}\cot\frac{\theta}{2})\boldsymbol{n}\boldsymbol{n}^T - \frac{\theta}{2}\boldsymbol{n}^\wedge$$
+最后我们可以得到如图转换关系
+![alt text](Image//image-2.png)
