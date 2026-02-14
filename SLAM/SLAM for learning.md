@@ -331,3 +331,71 @@ $$e^{\xi^\land} \triangleq \begin{bmatrix}
 $$\boldsymbol{J}^{-1} = \frac{\theta}{2}\cot\frac{\theta}{2}\boldsymbol{I} + (1 - \frac{\theta}{2}\cot\frac{\theta}{2})\boldsymbol{n}\boldsymbol{n}^T - \frac{\theta}{2}\boldsymbol{n}^\wedge$$
 最后我们可以得到如图转换关系
 ![alt text](Image//image-2.png)
+
+### 求导与扰动模型
+在$\mathrm{SO}(3)$上的两个矩阵$A,B$相乘是否对应了其$\mathfrak{so}(3)$上的两个矩阵相加即：
+$$e^{\phi^\land_1} e^{\phi^\land_2} = e^{(\phi_1 + \phi_2)^\land}$$
+当元素为标量这是显然的，但当其为函数却不成立，我们相当于在研究：
+$$\ln e^{\boldsymbol{A}} e^{\boldsymbol{B}} = \boldsymbol{A} + \boldsymbol{B}$$
+这个在矩阵运算中并不成立，但是我们能通过$\mathrm{Baker-Campbell-Hausdorff, BCH}$**公式**得到：
+$$\ln e^{\boldsymbol{A}} e^{\boldsymbol{B}} = \boldsymbol{A} + \boldsymbol{B} = \boldsymbol{A} + \boldsymbol{B} + \cfrac{1}{2} [\boldsymbol{A, B}] + \cfrac{1}{12}[\boldsymbol{A}, [\boldsymbol{A, B}]] - \cfrac{1}{12} [\boldsymbol{B}, [\boldsymbol{A, B}]] + \cdots$$
+在$\phi_1,\phi_2$分别为小量时该公式可线性表达为$\boldsymbol{J}_l (\phi_2)^{-1}\phi_1 + \phi_2$和$\boldsymbol{J}_r (\phi_1)^{-1}\phi_2 + \phi_1$，这里的$\boldsymbol{J}(\phi)$是一个函数，由于$\phi = \theta \boldsymbol{n}$，所以这个函数的结果就是之前推导出来的由$\theta$和$\boldsymbol{n}$组成的$\boldsymbol{J}$计算公式
+也不难证明左乘雅可比矩阵相当于右乘自变量为负的雅可比矩阵：（这里的左右乘仍然在主体左边，左右是相对于变换来说的）
+$$\boldsymbol{J}_r(\phi) = \boldsymbol{J}_l(-\phi)$$
+例如，对于$\mathfrak{so}(3)$上一个旋转$\phi$，给它左乘一个微小旋转$\Delta \boldsymbol{R}$，对应的李代数为$\Delta \phi$，在李群到李代数上就是：
+$$\Delta \boldsymbol{R} \cdot \boldsymbol{R} = e^{ (\phi + \boldsymbol{J}^{-1}_l (\phi) \Delta \phi)^\land }$$
+如果在李代数上加法，那从李代数到李群上就是：
+$$e^{ (\phi + \Delta \phi)^\land } = e^{ (\boldsymbol{J}_l \Delta \phi)^\land } \boldsymbol{R} = \boldsymbol{R} e^{ (\boldsymbol{J}_r \Delta \phi)^\land }$$
+在$\mathfrak{se}(3)$上也有类似的结论，不过这里的$\boldsymbol{J}$要换成$\mathcal{J}$，这是一个$6\times 6$矩阵，形式较为复杂暂不讨论
+
+#### $\mathfrak{so}(3)$上的求导
+##### 背景
+假设一个机器人相对于世界坐标系的变换矩阵$\boldsymbol{T}$，它观察到了一个世界坐标位于$\boldsymbol{p}$的点，产生了一个观测数据$\boldsymbol{z}$，那么有：
+$$\boldsymbol{z} = \boldsymbol{Tp} + \boldsymbol{w}$$
+其中$\boldsymbol{w}$是随机噪声，我们的目的是计算实际与观测数据的误差$\boldsymbol{e} = \boldsymbol{z} - \boldsymbol{Tp}$并使若观测到了$N$个点，生成的$N$个数据误差最小：
+$$\min\limits_{\boldsymbol{T}} J(\boldsymbol{T}) = \sum\limits_{i = 1}^N ||\boldsymbol{z}_i - \boldsymbol{Tp}||^2_2$$
+求解此问题，需要计算目标函数$J$关于变换矩阵$\boldsymbol{T}$的导数，然而由于李群这种非欧空间没有良定义的加法，导致导数的定义也无从谈起，所以我们不能对位姿求导，只能在李代数上求导：
+- 以李代数的姿态向量表示变换矩阵，然后根据李代数的加法对**李代数求导**
+- 对李群左乘或右乘微小扰动，然后对该**扰动求导**，称为左扰动和右扰动模型
+
+##### 李代数求导
+对于空间点$\boldsymbol{p}$和旋转$\boldsymbol{R}$，我们无法计算$\cfrac{ \partial(\boldsymbol{Rp}) }{ \partial\boldsymbol{R} }$，因为$\mathrm{SO}(3)$没有加法，所以我们计算李代数形式的导数：
+$$\cfrac{ \partial(e^{ \phi^\land }\boldsymbol{p}) }{\partial \phi}$$
+按照导数的定义可算得$\cfrac{ \partial(e^{ \phi^\land }\boldsymbol{p}) }{\partial \phi} = -(\boldsymbol{Rp})^\land \boldsymbol{J}_l$
+唯一的问题是这里含有形式较为复杂的$\boldsymbol{J}_l$
+
+##### 扰动模型
+我们对$\boldsymbol{R}$进行一次扰动$\Delta \boldsymbol{R}$（李代数下是$\varphi$），观察结果相对于扰动的变化率，左乘右乘无所谓只会有一点差异，假设左扰动，此时我们要计算的就是$\varphi$关于函数$g(\varphi) = e^{\varphi^\land}\boldsymbol{Rp}$在$\varphi = 0$处的导数：
+$$\cfrac{\partial \boldsymbol{Rp}}{\partial \varphi} = \lim\limits_{\varphi \rightarrow 0} \cfrac{ e^{\varphi^\land} e^{\phi^\land}\boldsymbol{p} - e^{\phi^\land} \boldsymbol{p} }{\varphi} = -(\boldsymbol{Rp})^\land$$
+$\mathrm{SE}(3)$上的李代数求导的扰动模型为：
+$$\cfrac{ \partial (\boldsymbol{Tp}) }{ \partial \Delta \xi } = \begin{bmatrix}
+  \boldsymbol{I} & -(\boldsymbol{Rp} + \boldsymbol{t}) ^ \land \\
+  \bold{0}^T & \bold{0}^T
+\end{bmatrix} = (\boldsymbol{Tp})^\odot$$
+这里$^\odot$是被定义的一个算符，它把一个齐次坐标空间点变换成一个$4\times 6$的矩阵，在这里我们约定符号写法规则：
+$$\cfrac{\mathrm{d} \begin{bmatrix}
+  \boldsymbol{a} \\
+  \boldsymbol{b}
+\end{bmatrix}}{ \mathrm{d} \begin{bmatrix}
+  \boldsymbol{x} \\
+  \boldsymbol{y}
+\end{bmatrix}} = \begin{bmatrix}
+  \cfrac{\mathrm{d} \boldsymbol{a}}{ \mathrm{d} \boldsymbol{x}} & \cfrac{\mathrm{d} \boldsymbol{a}}{ \mathrm{d} \boldsymbol{y}} \\
+  \cfrac{\mathrm{d} \boldsymbol{b}}{ \mathrm{d} \boldsymbol{x}} & \cfrac{\mathrm{d} \boldsymbol{b}}{ \mathrm{d} \boldsymbol{y}}
+\end{bmatrix}$$
+
+### $\mathbf{Sophus}$库
+先介绍几个轨迹误差：
+对于估计轨迹$\boldsymbol{T}_{\mathrm{esti},i}$和真实轨迹$\boldsymbol{T}_{\mathrm{gt},i}$，其中$i = 1,\cdots,N$
+- **绝对轨迹误差**$(\mathrm{Absolute~Trajectory~Erroe,ATE})$：
+  $$\mathrm{ATE_{all}} = \sqrt{ \cfrac{1}{N} \sum\limits_{i = 1}^N ||\log (\boldsymbol{T}^{-1}_\mathrm{gt,i} \boldsymbol{T}_{\mathrm{esti,i}})^\lor ||^2_2 }$$
+  其中$\mathrm{log}$表示以2为底
+- **绝对平移误差**$(\mathrm{Average~Translational~Error})$
+  $$\mathrm{ATE_{trans}} = \sqrt{ \cfrac{1}{N} \sum\limits_{i = 1}^N ||\mathrm{trans} (\boldsymbol{T}^{-1}_\mathrm{gt,i} \boldsymbol{T}_{\mathrm{esti,i}}) ||^2_2 }$$
+  其中$\mathrm{trans}$表示内部向量的平移部分
+- **相对位姿误差**$(\mathrm{Relative~Pose~Error,RPE})$
+  $$\mathrm{RPE_{all}} = \sqrt{ \cfrac{1}{N - \Delta t} \sum\limits_{i = 1}^{N - \Delta t} ||\log ((\boldsymbol{T}^{-1}_\mathrm{gt,i} \boldsymbol{T}_{\mathrm{gt,i+\Delta t}})^{-1} (\boldsymbol{T}^{-1}_\mathrm{esti,i} \boldsymbol{T}_{\mathrm{esti,i+\Delta t}}))^\lor ||^2_2 }$$
+- 相对位姿误差平移部分
+  只需要将$\mathrm{RPE}$的$\log$换成$\mathrm{trans}$再去掉$^\lor$即可
+
+p92
