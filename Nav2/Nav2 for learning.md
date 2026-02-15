@@ -1164,4 +1164,121 @@ FollowPath:
 ```
 我们修改对应的launch文件中调用这个文件的参数名，重新编译整个包刷新环境后正常运行launch文件就能使用上我们自己写的dwa算法了
 
-#### 
+#### 误差计算
+通过$\mathrm{Sophus}$库可以将我们的`/odom`话题下的位姿和在gazebo仿真中的位姿结合来计算轨迹误差$\boldsymbol{T}_{\mathrm{err}}$
+在此之前我们需要安装`tf2_eigen`以及`Sophus`库，前者一般已经安装完毕了（可以通过`sudo apt install ros-<ros-distro>-tf2-eigen`查看），后者最好是安装**模板类**版本的库：
+```bash
+# 1. 创建一个存放源码的文件夹
+mkdir -p ~/3rdparty && cd ~/3rdparty
+
+# 2. 从 GitHub 克隆最新的源码
+git clone https://github.com/strasdat/Sophus.git
+cd Sophus
+
+# 3. 创建编译目录
+mkdir build && cd build
+
+# 4. 编译并安装
+cmake ..
+make -j1
+sudo make install
+```
+注意`make -j1`表明单核编译，如果对自己的内存有足够信心可以使用`make -j$(nproc)`会快一点，记得分配交换内存（至少8G以上），这个安装后的库一般位于`/usr/local/include/sophus`
+于是我们编写一个`odom_evaluator.hpp`：
+```cpp
+#include "rclcpp/rclcpp.hpp"
+#include "nav_msgs/msg/odometry.hpp"
+#include "sophus/se3.hpp"
+#include "eigen3/Eigen/Core"
+#include "tf2_eigen/tf2_eigen.hpp"
+
+class OdomEvaluator : public rclcpp::Node {
+
+public:
+
+    OdomEvaluator();
+private:
+
+    void compute_error();
+
+    rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
+    rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr gt_sub_;
+    rclcpp::TimerBase::SharedPtr timer_;
+
+    Sophus::SE3d last_odom_, last_gt_;
+    bool has_odom_ = false, has_gt_ = false;
+};
+```
+以及一个`odom_evaluator.cpp`：
+```cpp
+#include "odom_evaluator.hpp"
+
+OdomEvaluator::OdomEvaluator() : Node("odom_evaluator") {
+
+    odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
+        "/odom", 10, [this](const nav_msgs::msg::Odometry::SharedPtr msg) {
+
+            Eigen::Isometry3d eigen_pose;
+            tf2::fromMsg(msg->pose.pose, eigen_pose);
+            last_odom_ = Sophus::SE3d(eigen_pose.rotation(), eigen_pose.translation());
+            has_odom_ = true;
+        }
+    );
+    gt_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
+        "/ground_truth", 10, [this](const nav_msgs::msg::Odometry::SharedPtr msg) {
+
+            Eigen::Isometry3d eigen_pose;
+            tf2::fromMsg(msg->pose.pose, eigen_pose);
+            last_gt_ = Sophus::SE3d(eigen_pose.rotation(), eigen_pose.translation());
+            has_gt_ = true;
+        }
+    );
+    timer_ = this->create_wall_timer(
+        std::chrono::milliseconds(200), [this](){
+            
+            compute_error();
+        }
+    );
+}
+
+void OdomEvaluator::compute_error() {
+
+    if (!has_odom_ || !has_gt_) return;
+
+    Sophus::SE3d T_err = last_gt_.inverse() * last_odom_;
+
+    double trans_err = T_err.translation().norm(),
+        rot_err = T_err.so3().log().norm();
+
+    RCLCPP_INFO(this->get_logger(), 
+            "误差统计 -> 平移: %.4f m, 旋转: %.4f rad (%.2f deg)", 
+            trans_err, rot_err, rot_err * 180.0 / M_PI);
+}
+
+int main(int argc, char** argv) {
+    
+    rclcpp::init(argc, argv);
+    rclcpp::spin(std::make_shared<OdomEvaluator>());
+    rclcpp::shutdown();
+    return 0;
+}
+```
+完成后记得在cmake文件以及`package.xml`中配置好依赖与可执行文件的安装
+还有一点是我们需要配置gazebo插件才能获取真实位姿，我们在urdf文件中添加这个插件：
+```xml
+<gazebo>
+    <plugin
+        filename="gz-sim-odometry-publisher-system"
+        name="gz::sim::systems::OdometryPublisher">
+        <odom_topic>ground_truth</odom_topic> <odom_frame>world</odom_frame>
+        <robot_base_frame>base_footprint</robot_base_frame>
+        <tf_topic>ground_truth/tf</tf_topic>
+        <dimensions>3</dimensions>
+    </plugin>
+</gazebo>
+```
+同时还需要在launch文件中（或者手动发布命令）添加桥接节点中的一段桥接
+```py
+'/ground_truth@nav_msgs/msg/Odometry[gz.msgs.Odometry'
+```
+随后编译运行，只要用`ros2 run my_nav2_robot odom_evaluator`就可以启动误差估计节点了

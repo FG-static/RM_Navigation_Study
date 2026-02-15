@@ -384,6 +384,37 @@ $$\cfrac{\mathrm{d} \begin{bmatrix}
   \cfrac{\mathrm{d} \boldsymbol{b}}{ \mathrm{d} \boldsymbol{x}} & \cfrac{\mathrm{d} \boldsymbol{b}}{ \mathrm{d} \boldsymbol{y}}
 \end{bmatrix}$$
 
+### 相似变换
+对于一个空间内的点$\boldsymbol{p}$，经过相似变换后的点为$\boldsymbol{p}'$，则：
+$$\boldsymbol{p}' = \begin{bmatrix}
+  s\boldsymbol{R} & \boldsymbol{t} \\
+  \bold{0}^T & 1
+\end{bmatrix} = s\boldsymbol{Rp} + \boldsymbol{t}$$
+尺度$s$表示对$\boldsymbol{p}$进行了一次缩放，这个变换矩阵也构成一个相似变换群$\mathrm{Sim}(3)$：
+$$\mathrm{Sim}(3) = \begin{Bmatrix}
+  \boldsymbol{S} = \begin{bmatrix}
+    s\boldsymbol{R} & \boldsymbol{t} \\
+    \bold{0}^T & 1
+  \end{bmatrix} \in \mathbb{R}^{4\times 4}
+\end{Bmatrix}$$
+其也有对应的李代数$\mathfrak{sim}(3)$，其内的元素$\zeta$为七维向量，前六维和$\mathfrak{se}(3)$相同，最后多了一项$\sigma$：
+$$\mathfrak{sim}(3) = \begin{Bmatrix}
+  \zeta | \zeta = \begin{bmatrix}
+    \rho \\
+    \phi \\
+    \sigma
+  \end{bmatrix} \in \mathbb{R}^7, \zeta^\land = \begin{bmatrix}
+    \sigma \boldsymbol{I} + \phi^\land & \rho \\
+    \bold{0}^T & 0
+  \end{bmatrix} \in \mathbb{R}^{4 \times 4}
+\end{Bmatrix}$$
+也比$\mathfrak{se}(3)$多一项$\sigma$，关联李群和李代数的指数映射为：
+$$e^{\zeta^\land} = \begin{bmatrix}
+  e^\sigma e^{\phi^\land} & \boldsymbol{J}_s\rho \\
+  \bold{0}^T & 1
+\end{bmatrix}$$
+其中$\boldsymbol{J}_s = \cfrac{e^\sigma - 1}{\sigma} \boldsymbol{I} + \cfrac{\sigma e^\sigma \sin\theta + \theta(1 - e^\sigma \cos\theta)}{\sigma^2 + \theta^2}\boldsymbol{a}^\land + (\cfrac{e^\sigma - 1}{\sigma} - \cfrac{\sigma (e^\sigma \cos\theta - 1) + \theta(e^\sigma \sin\theta)}{\sigma^2 + \theta^2})\boldsymbol{a}^\land\boldsymbol{a}^\land$
+
 ### $\mathbf{Sophus}$库
 先介绍几个轨迹误差：
 对于估计轨迹$\boldsymbol{T}_{\mathrm{esti},i}$和真实轨迹$\boldsymbol{T}_{\mathrm{gt},i}$，其中$i = 1,\cdots,N$
@@ -398,4 +429,3 @@ $$\cfrac{\mathrm{d} \begin{bmatrix}
 - 相对位姿误差平移部分
   只需要将$\mathrm{RPE}$的$\log$换成$\mathrm{trans}$再去掉$^\lor$即可
 
-p92
