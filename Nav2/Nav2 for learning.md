@@ -1282,3 +1282,281 @@ int main(int argc, char** argv) {
 '/ground_truth@nav_msgs/msg/Odometry[gz.msgs.Odometry'
 ```
 随后编译运行，只要用`ros2 run my_nav2_robot odom_evaluator`就可以启动误差估计节点了
+特别的，如果我们想查看两条轨迹的具体形式，可以使用`python`写一个`trajectory_saver.py`来记录两个话题的所有位姿并绘制成一个轨迹对比图（使用`matplotlib`库）：
+```python
+import rclpy
+from rclpy.node import Node
+from nav_msgs.msg import Odometry
+import matplotlib.pyplot as plt
+
+class TrajectoryPlotter(Node):
+    def __init__(self):
+        super().__init__('trajectory_plotter')
+
+        self.odom_x, self.odom_y, self.gt_x, self.gt_y = [], [], [], []
+
+        self.create_subscription(Odometry, '/odom', self.odom_cb, 10)
+        self.create_subscription(Odometry, '/ground_truth', self.gt_cb, 10)
+        self.timer = self.create_timer(10.0, self.status_report)
+        self.get_logger().info('轨迹记录器启动')
+    
+    def odom_cb(self, msg):
+        self.odom_x.append(msg.pose.pose.position.x)
+        self.odom_y.append(msg.pose.pose.position.y)
+    
+    def gt_cb(self, msg):
+        self.gt_x.append(msg.pose.pose.position.x)
+        self.gt_y.append(msg.pose.pose.position.y)
+    
+    def status_report(self):
+        self.get_logger().info(f'已记录点数: Odom={len(self.odom_x)}, GT={len(self.gt_x)}')
+
+    def save_plot(self):
+        plt.figure(figsize=(10, 10), facecolor='white')
+        plt.plot(self.gt_x, self.gt_y, label='Ground Truth', color='green', linewidth=2)
+        plt.plot(self.odom_x, self.odom_y, label='Odometry', color='red', linestyle='--', linewidth=1.5)
+
+        plt.title('Robot Trajectory Comparison')
+        plt.xlabel('X (meters)')
+        plt.ylabel('Y (meters)')
+        plt.legend()
+        plt.grid(True, linestyle=':', alpha=0.6)
+        plt.axis('equal') 
+
+        save_path = 'trajectory_result.png'
+        plt.savefig(save_path)
+        print(f'\n图片已保存至: {save_path}')
+
+def main():
+    rclpy.init()
+    node = TrajectoryPlotter()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        node.save_plot()
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+if __name__ == '__main__':
+    main()
+```
+这个脚本只要用
+```bash
+chmod +x trajectory_saver.py
+```
+把它变为可执行文件，再
+```python
+python3 trajectory_saver.py
+```
+就能运行这个节点了，好处是不用每次都重新编译，记得该节点应在小车运动前、环境初始化后启动，同时如果想要生成图像使用`ctrl+c`中止节点运行就会自动保存图像了，应该能得到如下结果：
+![alt text](Image//image-13.png)
+
+### 全局路径规划算法
+我们也可以自己写一个规划器插件用在我们的机器人上，对于全局路径规划，我们先采用A*算法
+
+#### $\mathrm{OpenCV}$可视化
+在正式写插件之前，可以先使用opencv进行一个寻路可视化，在此之前，我们需要拥有一个用slam建的图的`.pgm`和`.yaml`文件，新建一个项目`planner_test`，对于里面的文件`astar_visualizer.hpp`：
+```cpp
+#include "opencv2/opencv.hpp"
+#include <vector>
+#include <queue>
+#include <iostream>
+#include <cmath>
+#include <algorithm>
+
+struct Node {
+
+    cv::Point pos;
+    double g, h; // 代价
+    Node* Parent;
+    bool operator>(const Node &other) const { return (g + h) > (other.g + other.h); }
+};
+
+class MapPlanner {
+
+public:
+
+    cv::Mat map_img, display_map, raw_map;
+    double resolution = 0.05;
+    double origin_x = -5.046, origin_y = -4.64;
+    int img_w = 200, img_h = 162;
+    std::vector<cv::Point> path;
+
+    MapPlanner(std::string pgm_path);
+    void preprocessMap();
+    cv::Point WorldToMap(double wx, double wy);
+    void plan(cv::Point start, cv::Point goal);
+};
+```
+`astar_visualizer.cpp`：
+```cpp
+#include "astar_visualizer.hpp"
+
+MapPlanner::MapPlanner(std::string pgm_path) {
+
+    // 加载灰度图
+    map_img = cv::imread(pgm_path, cv::IMREAD_GRAYSCALE);
+    raw_map = map_img;
+    if (map_img.empty()) {
+
+        std::cerr << "Failed to load .pgm";
+        return;
+    }
+    //cv::threshold(map_img, map_img, 100, 255, cv::THRESH_BINARY);
+}
+
+void MapPlanner::preprocessMap() {
+
+    cv::cvtColor(map_img, display_map, cv::COLOR_GRAY2BGR);
+
+    // 腐蚀核Size(9, 9) -> r=4
+    // 4像素*0.05 分辨率=0.2
+    int robot_radius_pixel = 4; 
+    cv::Mat element = cv::getStructuringElement(cv::MORPH_RECT, 
+                      cv::Size(2 * robot_radius_pixel + 1, 2 * robot_radius_pixel + 1));
+    cv::erode(map_img, map_img, element);
+}
+
+cv::Point MapPlanner::WorldToMap(double wx, double wy) {
+
+    int mx = static_cast<int>(std::round(wx - origin_x) / resolution),
+        premy = static_cast<int>(std::round(wy - origin_y) / resolution);
+    int my = img_h - premy;
+    mx = std::max(0, std::min(mx, img_w - 1));
+    my = std::max(0, std::min(my, img_h - 1));
+    return cv::Point(mx, my);
+}
+
+void MapPlanner::plan(cv::Point start, cv::Point goal) {
+
+    std::vector<std::vector<double>> g_values(map_img.rows, std::vector<double>(map_img.cols, std::numeric_limits<double>::infinity()));
+    std::vector<std::vector<bool>> closed_list(map_img.rows, std::vector<bool>(map_img.cols, false));
+    std::vector<std::vector<cv::Point>> parents(map_img.rows, std::vector<cv::Point>(map_img.cols, cv::Point(-1, -1)));
+
+    std::priority_queue<Node, std::vector<Node>, std::greater<Node>> open_list;
+
+    // 放入起点
+    g_values[start.y][start.x] = 0;
+    double h_cost_ = std::sqrt(std::pow(start.x - goal.x, 2) + std::pow(start.y - goal.y, 2));
+    open_list.push({start, 0, h_cost_, nullptr});
+
+    // 寻路
+    while (!open_list.empty()) {
+        
+        Node cur = open_list.top();
+        open_list.pop();
+        display_map.at<cv::Vec3b>(cur.pos.y, cur.pos.x) = cv::Vec3b(200, 200, 255);
+
+        if (closed_list[cur.pos.y][cur.pos.x]) continue;
+        closed_list[cur.pos.y][cur.pos.x] = true;
+
+        if (cur.pos == goal) {
+
+            std::cout << "Path Found" << std::endl;
+            cv::Point curr = goal;
+
+            while (curr != start && curr != cv::Point(-1, -1)) {
+
+                path.push_back(curr);
+                curr = parents[curr.y][curr.x];
+            }
+            path.push_back(start);
+
+            // 绘制最终路径
+            for (size_t i = 0; i < path.size() - 1; ++ i) {
+
+                cv::line(display_map, path[i], path[i + 1], cv::Scalar(255, 0, 0), 2);
+            }
+            cv::imshow("A* Result", display_map);
+            return;
+        }
+
+        for (int dx = -1; dx <= 1; ++ dx) {
+
+            for (int dy = -1; dy <= 1; ++ dy) {
+
+                if (dx == 0 && dy == 0) continue;
+
+                cv::Point nei_pos(cur.pos.x + dx, cur.pos.y + dy);
+
+                // 边界与碰撞检查
+                if (nei_pos.x < 0 || nei_pos.x >= map_img.cols || 
+                    nei_pos.y < 0 || nei_pos.y >= map_img.rows) continue;
+                if (map_img.at<uchar>(nei_pos.y, nei_pos.x) == 0) continue;
+
+                // 未知区域罚分
+                uchar raw_pixel = raw_map.at<uchar>(nei_pos.y, nei_pos.x);
+                double extra_cost = 0.0;
+                if (raw_pixel < 250 && raw_pixel > 150) { 
+
+                    extra_cost = 10.0;
+                }
+
+                double step_cost = (dx != 0 && dy != 0) ? 1.414 : 1.0,
+                    tentative_g = g_values[cur.pos.y][cur.pos.x] + step_cost + extra_cost;
+
+                if (tentative_g < g_values[nei_pos.y][nei_pos.x]) {
+
+                    g_values[nei_pos.y][nei_pos.x] = tentative_g;
+                    display_map.at<cv::Vec3b>(nei_pos.y, nei_pos.x) = cv::Vec3b(255, 200, 200);
+
+                    static int count = 0;
+                    if (count ++ % 50 == 0) { // 每50个点刷新一次界面
+
+                        cv::imshow("A* Searching Process", display_map);
+                        cv::waitKey(30);
+                    }
+
+                    parents[nei_pos.y][nei_pos.x] = cur.pos;
+                    double h = std::sqrt(std::pow(nei_pos.x - goal.x, 2) + std::pow(nei_pos.y - goal.y, 2));
+                    open_list.push({nei_pos, tentative_g, h, nullptr});
+                }
+            }
+        }
+    } 
+}
+int main() {
+    
+    MapPlanner planner("map1.pgm");
+    
+    cv::Point start_px = planner.WorldToMap(-4.0, 1.0);
+    cv::Point goal_px = planner.WorldToMap(1.0, -3.0);
+
+    planner.preprocessMap();
+
+    planner.plan(start_px, goal_px);
+    cv::waitKey(0);
+    return 0;
+}
+```
+以及cmake文件：
+```c
+cmake_minimum_required(VERSION 3.10)
+project(planner_test)
+set(CMAKE_CXX_STANDARD 14)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+# 找
+find_package(OpenCV REQUIRED)
+
+# 添加可执行文件
+add_executable(planner_test 
+    astar_visualizer.cpp
+)
+
+# 链接 OpenCV 库
+target_link_libraries(planner_test 
+    ${OpenCV_LIBRARIES}
+)
+```
+随后需要新建一个`build`文件夹在里面进行`cmake ..`和`make -j1`完成编译，随后`./planner_test`就能运行了，注意`map1.pgm`需要放到`build`文件夹内
+这个项目主要利用了**栅格化地图**来进行坐标转换，将每一个坐标点（特定分辨率下是有限的）作为节点，设定好`start`和`goal`（根节点与目标节点）后就可以开始规划了
+而作为主体的地图我们需要准备三份，分别用来**寻路、展示、未知地带代价计算**
+- 寻路我们需要使用`erode`进行腐蚀，扩大黑色（障碍物）面积，更符合现实
+- 展示的话只需要展示最原始的地图即可
+- 未知地带的计算主要是对灰色部分（未探索区域）进行额外的代价叠加，让机器人尽可能避免走灰色地带，也是最原始的地图
+
+同时到达终点回溯的时候利用opencv可以将每一个点都用蓝色的线连起来，寻路时每一个到达的节点涂成浅红色，即将要探索的节点涂成浅蓝色，这样更能可视化整条路径
+如果设定了正确的起点和终点，应该能看到如下图像
+![alt text](Image//image-14.png)
