@@ -1142,6 +1142,7 @@ ament_package()
 
   <export>
     <build_type>ament_cmake</build_type>
+    <nav2_core plugin="${prefix}/plugins.xml" />
   </export>
 </package>
 ```
@@ -1560,3 +1561,240 @@ target_link_libraries(planner_test
 同时到达终点回溯的时候利用opencv可以将每一个点都用蓝色的线连起来，寻路时每一个到达的节点涂成浅红色，即将要探索的节点涂成浅蓝色，这样更能可视化整条路径
 如果设定了正确的起点和终点，应该能看到如下图像
 ![alt text](Image//image-14.png)
+
+#### 实践
+接下来我们将上述代码移植到一个规划器插件中，编写一个自定义A*路径规划器，依旧先创建功能包：
+```bash
+ros2 pkg create --build-type ament_cmake my_nav2_planner --dependencies nav2_core pluginlib rclcpp
+```
+按照官方教程所要求的继承5个基类函数并完成函数定义，以及一个`createPlan`函数来进行A*算法的核心代码编写
+`astar_planner.hpp`：
+```cpp
+#ifndef MY_NAV2_PLANNER__ASTAR_PLANNER
+#define MY_NAV2_PLANNER__ASTAR_PLANNER
+
+#include <memory>
+#include <string>
+#include <vector>
+#include <queue>
+
+#include "nav2_core/global_planner.hpp"
+#include "rclcpp/rclcpp.hpp"
+#include "nav_msgs/msg/path.hpp"
+#include "geometry_msgs/msg/pose_stamped.hpp"
+#include "nav2_costmap_2d/costmap_2d_ros.hpp"
+#include "nav2_util/lifecycle_node.hpp"
+#include "nav2_util/node_utils.hpp"
+
+namespace my_nav2_planner {
+
+    class MyAStarPlanner : public nav2_core::GlobalPlanner {
+
+    public:
+
+        MyAStarPlanner() = default;
+        ~MyAStarPlanner() override = default;
+
+        void configure(
+            const rclcpp_lifecycle::LifecycleNode::WeakPtr &parent,
+            std::string name, std::shared_ptr<tf2_ros::Buffer> tf,
+            std::shared_ptr<nav2_costmap_2d::Costmap2DROS> costmap_ros) override;
+    
+        void activate() override;
+        void deactivate() override;
+        void cleanup() override;
+
+        nav_msgs::msg::Path createPlan(
+            const geometry_msgs::msg::PoseStamped &start,
+            const geometry_msgs::msg::PoseStamped &goal,
+            std::function<bool()> cancel_checker) override;
+    private:
+
+        std::shared_ptr<tf2_ros::Buffer> tf_;
+        nav2_util::LifecycleNode::SharedPtr node_;
+        nav2_costmap_2d::Costmap2D *costmap_;
+        std::string global_frame_, name_;
+        double unknown_cost_, interpolation_resolution_;
+    };
+} // namespace my_nav2_planner
+
+#endif // MY_NAV2_PLANNER__ASTAR_PLANNER
+```
+`astar_planner.cpp`：
+```cpp
+#include "my_nav2_planner/astar_planner.hpp"
+#include "nav2_core/planner_exceptions.hpp"
+#include "pluginlib/class_list_macros.hpp"
+#include "nav2_util/node_utils.hpp"
+
+#include <cmath>
+#include <unordered_map>
+
+namespace my_nav2_planner {
+
+    void MyAStarPlanner::configure(
+        const rclcpp_lifecycle::LifecycleNode::WeakPtr &parent,
+        std::string name, std::shared_ptr<tf2_ros::Buffer> tf,
+        std::shared_ptr<nav2_costmap_2d::Costmap2DROS> costmap_ros) {
+
+        node_ = parent.lock();
+        name_ = name;
+        costmap_ = costmap_ros->getCostmap();
+        global_frame_ = costmap_ros->getGlobalFrameID();
+
+        nav2_util::declare_parameter_if_not_declared(
+            node_, name_ + ".unknown_cost", rclcpp::ParameterValue(5.0));
+        node_->get_parameter(name_ + ".unknown_cost", unknown_cost_);
+        nav2_util::declare_parameter_if_not_declared(
+            node_, name_ + ".interpolation_resolution", rclcpp::ParameterValue(0.1));
+        node_->get_parameter(name_ + ".interpolation_resolution", interpolation_resolution_);
+
+        RCLCPP_INFO(node_->get_logger(), "自定义A*规划器配置完成");
+    }
+
+    void MyAStarPlanner::activate() { RCLCPP_INFO(node_->get_logger(), "插件已激活"); }
+    void MyAStarPlanner::deactivate() { RCLCPP_INFO(node_->get_logger(), "插件已停用"); }
+    void MyAStarPlanner::cleanup() { RCLCPP_INFO(node_->get_logger(), "插件已清理"); }
+
+    nav_msgs::msg::Path MyAStarPlanner::createPlan(
+        const geometry_msgs::msg::PoseStamped &start,
+        const geometry_msgs::msg::PoseStamped &goal,
+        std::function<bool()> cancel_checker) {
+
+        nav_msgs::msg::Path global_path;
+        global_path.header.frame_id = global_frame_;
+        global_path.header.stamp = node_->now();
+
+        // 坐标转换
+        unsigned int mx_start, my_start, mx_goal, my_goal;
+        if (!costmap_->worldToMap(start.pose.position.x, start.pose.position.y, mx_start, my_start) ||
+            !costmap_->worldToMap(goal.pose.position.x, goal.pose.position.y, mx_goal, my_goal)) {
+
+            RCLCPP_ERROR(node_->get_logger(), "Start or Goal is outside of costmap bounds");
+            return global_path;
+        }
+
+        // 路径规划
+        int width = costmap_->getSizeInCellsX(), 
+            height = costmap_->getSizeInCellsY();
+        int map_size = width * height;
+        std::vector<double> g_values(map_size, std::numeric_limits<double>::max());
+        std::vector<int> parent_map(map_size, -1);
+
+        typedef std::pair<double, int> Node;
+        std::priority_queue<Node, std::vector<Node>, std::greater<Node>> open_list;
+
+        int start_idx = my_start * width + mx_start,
+            goal_idx = my_goal * width + mx_goal;
+
+        g_values[start_idx] = 0.0;
+        open_list.push({0.0, start_idx});
+
+        bool found_path = false;
+
+        // 开始寻路
+        while (!open_list.empty()) {
+
+            int cur_idx = open_list.top().second;
+            open_list.pop();
+
+            if (cur_idx == goal_idx) {
+
+                found_path = true;
+                // TODO:
+                break;
+            }
+
+            int cx = cur_idx % width,
+                cy = cur_idx / width;
+
+            for (int dx = -1; dx <= 1; ++ dx) {
+
+                for (int dy = -1; dy <= 1; ++ dy) {
+
+                    if (dx == 0 && dy == 0) continue;
+                    int nx = cx + dx,
+                        ny = cy + dy;
+                    if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
+
+                    int next_idx = ny * width + nx;
+                    unsigned char cost = costmap_->getCost(nx, ny);
+
+                    if (cost >= 250 && cost <= 254) continue;
+
+                    double extra_cost = (cost == 255) ? unknown_cost_ : 0.0,
+                        step_cost = std::sqrt(dx * dx + dy * dy);
+                    double tentative_g = g_values[cur_idx] + step_cost + extra_cost;
+
+                    if (tentative_g < g_values[next_idx]) {
+
+                        g_values[next_idx] = tentative_g;
+                        parent_map[next_idx] = cur_idx;
+
+                        double h_cost = std::sqrt(std::pow(nx - (int)mx_goal, 2) + 
+                                        std::pow(ny - (int)my_goal, 2));
+                        open_list.push({tentative_g + h_cost, next_idx});
+                    }
+                }
+            }
+        }
+        if (found_path) {
+
+            std::vector<int> path_;
+            int curr_idx = goal_idx;
+            while (curr_idx != -1) {
+
+                path_.push_back(curr_idx);
+                curr_idx = parent_map[curr_idx];
+            }
+            std::reverse(path_.begin(), path_.end());
+
+            for (int idx : path_) {
+
+                geometry_msgs::msg::PoseStamped pose;
+                pose.header.frame_id = global_frame_;
+                pose.header.stamp = node_->now();
+
+                unsigned int mx = idx % width,
+                    my = idx / width;
+                double wx, wy;
+                costmap_->mapToWorld(mx, my, wx, wy);
+
+                pose.pose.position.x = wx;
+                pose.pose.position.y = wy;
+                pose.pose.orientation = goal.pose.orientation;
+                global_path.poses.push_back(pose);
+            }
+        } else {
+
+            global_path.poses.clear();
+            RCLCPP_WARN(node_->get_logger(), "A* failed to find a path from start to goal");
+        }
+        return global_path;
+    } 
+}// namespace my_nav2_planner
+
+PLUGINLIB_EXPORT_CLASS(my_nav2_planner::MyAStarPlanner, nav2_core::GlobalPlanner)
+```
+值得注意的是，我们的地图存取可以直接使用`nav2_costmap_2d::Costmap2D`指针类型，同时不需要手动进行腐蚀操作，我们只需要判断地图代价是否在250到254之间（通常意味着快接近障碍物），是的话直接中断该条路径即可，当地图代价是255，说明到达未知区域，此时可以设定额外代价最终加上。同时为了保证内存效率，我们使用一维容器用形如`idx = y * width + x`的形式存取变量，取变量则
+```cpp
+x = idx % width;
+y = idx / width;
+```
+即可，其余代码无太大差别
+最后要注意的就是各种配置环境文件的编写，完成后在`nav2_params_nav_diy.yaml`的`planner_server`栏目下改为：
+```py
+planner_server:
+  ros__parameters:
+    use_sim_time: True
+    expected_planner_frequency: 20.0
+    planner_plugins: ["GridBased"]
+    costmap_update_timeout: 1.0
+    GridBased:
+      plugin: "my_nav2_planner/MyAStarPlanner"
+      unknown_cost: 5.0
+      interpolation_resolution: 0.1
+```
+类似的即可，随后编译运行，在规划了路径后可以看到
+![alt text](Image//image-15.png)
+此时的路径是锯齿状的，我们在后面进行平滑器的编写后可以将其优化为更顺化的曲线
