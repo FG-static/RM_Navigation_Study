@@ -1798,3 +1798,321 @@ planner_server:
 类似的即可，随后编译运行，在规划了路径后可以看到
 ![alt text](Image//image-15.png)
 此时的路径是锯齿状的，我们在后面进行平滑器的编写后可以将其优化为更顺化的曲线
+
+### 平滑路径算法
+#### 梯度下降平滑算法
+##### 概论
+平滑算法中最常用的就是梯度下降平滑
+该算法主要由两个参数$\alpha ,\beta$主导，分别是**平滑力权重**和**保持力权重**，分别用于**平滑路径**和**保持原路径**。具体来说就是该算法由以下公式决定：
+$$P_i\leftarrow P_i + \alpha(P_{i - 1} + P_{i + 1} - 2P_i) + \beta(P_{i,\mathrm{original}} - P_i)$$其中$P_i$表示第$i$个路径点（一条路径在nav2中一般是`nav_msgs::msg::Path`类型，类似一个数组容器，里面由若干个路径点组成），而$P_{i,\mathrm{original}}$表示在经过平滑前的原始路径点（在第一次平滑前），利用该公式，算法进行若干次（由`max_iteration`决定）循环平滑（每次平滑都要用这个公式处理所有节点），这个公式的意义就是把路径点拉向两个路径点中心，但是为了防止过度拉扯导致可能碰到障碍物，所以需要最原始的路径点进行拉回路径，且我们需要使用代价地图中的代价等来判断是否回退（即放弃此次平滑，因为撞墙了），同时在平滑路径点后，该点的朝向（每个路径点都存储了小车此刻应有的位姿）也要修正，需使用四元数
+
+##### 实践
+我们可以利用这个简单写一个平滑器，在这个平滑其中我们不额外对路径进行额外线性插值（我们假设在规划器中已经做好了对路径疏密程度的处理），只进行路径平滑。同样，先进行功能包创建：
+```bash
+ros2 pkg create --build-type ament_cmake my_nav2_smoother --dependencies nav2_core pluginlib rclcpp
+```
+注意平滑器的基类继承函数与规划器和控制器有部分区别
+`gradient_smoother.hpp`：
+```cpp
+#ifndef MY_NAV2_SMOOTHER__GRADIENT_SMOOTHER
+#define MY_NAV2_SMOOTHER__GRADIENT_SMOOTHER
+
+#include <vector>
+#include <memory>
+#include <string>
+
+#include "nav2_costmap_2d/costmap_subscriber.hpp"
+#include "nav2_costmap_2d/footprint_subscriber.hpp"
+#include "nav2_core/smoother.hpp"
+#include "rclcpp/rclcpp.hpp"
+#include "nav_msgs/msg/path.hpp"
+#include "nav2_util/lifecycle_node.hpp"
+#include "nav2_util/node_utils.hpp"
+#include "nav2_costmap_2d/costmap_2d_ros.hpp"
+
+namespace my_nav2_smoother {
+
+    class MyGradientSmoother : public nav2_core::Smoother {
+
+    public:
+
+        MyGradientSmoother() = default;
+        ~MyGradientSmoother() override = default;
+
+        void configure(
+            const rclcpp_lifecycle::LifecycleNode::WeakPtr & parent,
+            std::string name, 
+            std::shared_ptr<tf2_ros::Buffer> /*tf*/,
+            std::shared_ptr<nav2_costmap_2d::CostmapSubscriber> costmap_sub,
+            std::shared_ptr<nav2_costmap_2d::FootprintSubscriber> /*footprint_sub*/) override;
+
+        void cleanup() override;
+        void activate() override;
+        void deactivate() override;
+
+        bool smooth(
+            nav_msgs::msg::Path &path,
+            const rclcpp::Duration &/*max_time*/) override;
+    private:
+
+        // 平滑算法
+        void applyGradientDescent(nav_msgs::msg::Path &path, const nav_msgs::msg::Path &raw_path);
+
+        // 平滑力、拉回力权重
+        double alpha_ = 0.1, beta_ = 0.5;
+        nav2_util::LifecycleNode::SharedPtr node_;
+        std::string name_;
+        int max_iterations_ = 500;
+        std::shared_ptr<nav2_costmap_2d::CostmapSubscriber> costmap_sub_;
+    };
+} // my_nav2_smoother
+
+#endif // MY_NAV2_SMOOTHER__GRADIENT_SMOOTHER
+```
+`gradient_smoother.cpp`：
+```cpp
+#include "my_nav2_smoother/gradient_smoother.hpp"
+#include "pluginlib/class_list_macros.hpp"
+#include "tf2/LinearMath/Quaternion.h"
+#include "tf2_geometry_msgs/tf2_geometry_msgs.hpp"
+
+namespace my_nav2_smoother {
+
+    void MyGradientSmoother::configure(
+        const rclcpp_lifecycle::LifecycleNode::WeakPtr & parent,
+        std::string name, 
+        std::shared_ptr<tf2_ros::Buffer> /*tf*/,
+        std::shared_ptr<nav2_costmap_2d::CostmapSubscriber> costmap_sub,
+        std::shared_ptr<nav2_costmap_2d::FootprintSubscriber> /*footprint_sub*/
+    ) {
+            
+        costmap_sub_ = costmap_sub;
+        node_ = parent.lock();
+        name_ = name;
+
+        nav2_util::declare_parameter_if_not_declared(node_, name + ".alpha", rclcpp::ParameterValue(0.1));
+        nav2_util::declare_parameter_if_not_declared(node_, name + ".beta", rclcpp::ParameterValue(0.5));
+        nav2_util::declare_parameter_if_not_declared(node_, name + ".max_iterations", rclcpp::ParameterValue(500));
+
+        node_->get_parameter(name + ".alpha", alpha_);
+        node_->get_parameter(name + ".beta", beta_);
+        node_->get_parameter(name + ".max_iterations", max_iterations_);
+    }
+    void MyGradientSmoother::activate() { RCLCPP_INFO(node_->get_logger(), "插件已激活"); }
+    void MyGradientSmoother::deactivate() { RCLCPP_INFO(node_->get_logger(), "插件已停用"); }
+    void MyGradientSmoother::cleanup() { RCLCPP_INFO(node_->get_logger(), "插件已清理"); }
+    bool MyGradientSmoother::smooth(
+        nav_msgs::msg::Path &path,
+        const rclcpp::Duration &/*max_time*/
+    ) {
+
+        if (path.poses.size() < 3) return true;
+        nav_msgs::msg::Path raw_path = path;
+
+        applyGradientDescent(path, raw_path);
+
+        return true;
+    }
+    void MyGradientSmoother::applyGradientDescent(
+        nav_msgs::msg::Path &path, 
+        const nav_msgs::msg::Path &raw_path
+    ) {
+
+        auto costmap = costmap_sub_->getCostmap();
+        int n = path.poses.size();
+
+        for (int iter = 0; iter < max_iterations_; ++ iter) {
+
+            for (int i = 1; i < n - 1; ++ i) {
+
+                double 
+                    &x1 = path.poses[i].pose.position.x,
+                    &y1 = path.poses[i].pose.position.y,
+                    &x2 = path.poses[i + 1].pose.position.x,
+                    &y2 = path.poses[i + 1].pose.position.y,
+                    &x0 = path.poses[i - 1].pose.position.x,
+                    &y0 = path.poses[i - 1].pose.position.y;
+                double 
+                    old_x = x1,
+                    old_y = y1;
+                
+                x1 += 
+                    alpha_ * (x0 + x2 - 2.0 * x1) + 
+                    beta_ * (raw_path.poses[i].pose.position.x - x1);
+                y1 += 
+                    alpha_ * (y0 + y2 - 2.0 * y1) + 
+                    beta_ * (raw_path.poses[i].pose.position.y - y1);
+                
+                // 碰撞检查
+                unsigned int mx, my;
+                if (costmap->worldToMap(x1, y1, mx, my)) {
+
+                    if (costmap->getCost(mx, my) >= 250) {
+
+                        x1 = old_x;
+                        y1 = old_y;
+                    }
+                }
+            }
+            for (int i = 0; i < n - 1; ++ i) {
+
+                double 
+                    dx = path.poses[i + 1].pose.position.x - path.poses[i].pose.position.x,
+                    dy = path.poses[i + 1].pose.position.y - path.poses[i].pose.position.y;
+                double yaw = std::atan2(dy, dx);
+                tf2::Quaternion q;
+                q.setRPY(0, 0, yaw);
+                path.poses[i].pose.orientation = tf2::toMsg(q);
+            }
+            if (n > 1) 
+                path.poses.back().pose.orientation = path.poses[n - 2].pose.orientation;
+        }
+    }
+} // my_nav2_smoother
+
+PLUGINLIB_EXPORT_CLASS(my_nav2_smoother::MyGradientSmoother, nav2_core::Smoother);
+```
+完成cmake和`package.xml`以及`plugins/xml`的编写
+`CMakeLists.txt`：
+```c
+cmake_minimum_required(VERSION 3.8)
+project(my_nav2_smoother)
+
+if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+  add_compile_options(-Wall -Wextra -Wpedantic)
+endif()
+
+# find dependencies
+find_package(ament_cmake REQUIRED)
+find_package(rclcpp REQUIRED)
+find_package(nav2_core REQUIRED)
+find_package(nav2_util REQUIRED)
+find_package(nav2_costmap_2d REQUIRED)
+find_package(nav_msgs REQUIRED)
+find_package(geometry_msgs REQUIRED)
+find_package(pluginlib REQUIRED)
+find_package(tf2 REQUIRED)
+find_package(tf2_ros REQUIRED)
+find_package(tf2_geometry_msgs REQUIRED)
+
+# 添加头文件目录
+include_directories(include)
+
+# 编译动态库 (Shared Library)
+add_library(${PROJECT_NAME}_lib SHARED
+  src/gradient_smoother.cpp
+)
+ament_target_dependencies(${PROJECT_NAME}_lib
+  rclcpp
+  nav2_core
+  nav2_util
+  nav2_costmap_2d
+  nav_msgs
+  geometry_msgs
+  pluginlib
+  tf2
+  tf2_ros
+  tf2_geometry_msgs
+)
+
+pluginlib_export_plugin_description_file(nav2_core plugins.xml)
+
+install(TARGETS ${PROJECT_NAME}_lib
+  ARCHIVE DESTINATION lib
+  LIBRARY DESTINATION lib
+  RUNTIME DESTINATION bin
+)
+
+install(DIRECTORY include/
+  DESTINATION include/
+)
+
+# 导出依赖以供其他包使用
+ament_export_include_directories(include)
+ament_export_libraries(${PROJECT_NAME}_lib)
+ament_export_dependencies(nav2_core nav2_util pluginlib rclcpp)
+
+if(BUILD_TESTING)
+  find_package(ament_lint_auto REQUIRED)
+  # the following line skips the linter which checks for copyrights
+  # comment the line when a copyright and license is added to all source files
+  set(ament_cmake_copyright_FOUND TRUE)
+  # the following line skips cpplint (only works in a git repo)
+  # comment the line when this package is in a git repo and when
+  # a copyright and license is added to all source files
+  set(ament_cmake_cpplint_FOUND TRUE)
+  ament_lint_auto_find_test_dependencies()
+endif()
+
+ament_package()
+```
+`package.xml`：
+```xml
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>my_nav2_smoother</name>
+  <version>0.0.0</version>
+  <description>TODO: Package description</description>
+  <maintainer email="meis38@126.com">goose</maintainer>
+  <license>TODO: License declaration</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>nav2_core</depend>
+  <depend>nav2_util</depend>
+  <depend>nav2_costmap_2d</depend>
+  <depend>nav_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>pluginlib</depend>
+  <depend>tf2</depend>
+  <depend>tf2_ros</depend>
+  <depend>tf2_geometry_msgs</depend>
+
+  <test_depend>ament_lint_auto</test_depend>
+  <test_depend>ament_lint_common</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
+```
+`plugins.xml`：
+```xml
+<library path="my_nav2_smoother_lib">
+    <class name="my_nav2_smoother/MyGradientSmoother" 
+            type="my_nav2_smoother::MyGradientSmoother" 
+            base_class_type="nav2_core::Smoother">
+        <description>
+            简单的梯度下降路径平滑器
+        </description>
+    </class>
+</library>
+```
+我们在`nav2_params_nav.yaml`修改部分代码：
+```py
+smoother_server:
+  ros__parameters:
+    use_sim_time: True
+    smoother_plugins: ["simple_smoother"]
+    simple_smoother:
+      plugin: "my_nav2_smoother/MyGradientSmoother"
+      alpha: 0.1
+      beta: 0.5
+      max_iterations: 500
+```
+值得注意的是，一般情况下平滑器并不会启动，需要bt中编写启动的平滑器，我们将之前写的`test_nav.xml`（或使用groot2）中的`ComputePathToPose`处改为：
+```xml
+<Sequence>
+    <ComputePathToPose goal="{goal}"
+                        path="{path}"
+                        planner_id="GridBased"/>
+    <SmoothPath smoother_id="simple_smoother"
+                unsmoothed_path="{path}"
+                smoothed_path="{path}"/>
+</Sequence>
+```
+确保插件名称是正确的，然后去`bt_navigator`启动bt，随后编译运行应该能看到小车按照平滑路径走了，如果想要更明显的效果，可以可视化`/plan_smoothed`话题，这是小车平滑后的路径，设其为红色，应该可以看到例：
+![alt text](Image//image-16.png)
+有平滑效果
