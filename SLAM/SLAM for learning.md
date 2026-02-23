@@ -501,3 +501,10 @@ $$\rho = \cfrac{f(x + \Delta x) - f(x)}{\boldsymbol{J}(x)^T \Delta x}$$
 - 5. 若$\rho$大于某阈值，则认为近似可行，令$x_{k + 1} = x_k + \Delta x_k$
 - 6. 判断算法是否收敛，不收敛返回第二步，否则结束
 
+$\boldsymbol{D}$可以为单位阵也可以为非负数对角矩阵（通常取$\boldsymbol{J}^T\boldsymbol{J}$的对焦元素平方根），当其为单位阵时这个$\Delta x_k$被约束在一个球中，非单位阵则对应椭球，对于这种问题，我们可以使用拉格朗日乘子法：
+$$
+\mathcal{L}(\Delta x_k, \lambda) = \cfrac{1}{2}||f(x_k) + \boldsymbol{J}(x_k)^T\Delta x_k||^2 + \cfrac{\lambda}{2}(||\boldsymbol{D}\Delta x_k||^2 - \mu)$$
+这里$\lambda$为拉格朗日乘子，令其关于$\Delta x$的导数为0，得到增量的线性方程：
+$$
+(\boldsymbol{H} + \lambda\boldsymbol{D}^T\boldsymbol{D})\Delta x_k = g$$
+这里的$\boldsymbol{H}$和$g$定义与上述的高斯牛顿法一致，当$\lambda$较小，$\boldsymbol{H}$占主导地位，说明该二次近似模型在该范围内是比较好的，该方法更接近高斯牛顿法。另一方面，当$\lambda$较大时，$\lambda \boldsymbol{I}$占主导地位，说明该模型的二次近似不够好，该方法更接近于一阶梯度下降法
