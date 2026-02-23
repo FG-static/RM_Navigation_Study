@@ -500,3 +500,4 @@ $$\rho = \cfrac{f(x + \Delta x) - f(x)}{\boldsymbol{J}(x)^T \Delta x}$$
 - 4. 若$\rho > \cfrac{3}{4}$，则设置$\mu = 2\mu$，若$\rho < \cfrac{1}{4}$，则设置$\mu = 0.5\mu$
 - 5. 若$\rho$大于某阈值，则认为近似可行，令$x_{k + 1} = x_k + \Delta x_k$
 - 6. 判断算法是否收敛，不收敛返回第二步，否则结束
+
