@@ -429,3 +429,74 @@ $$e^{\zeta^\land} = \begin{bmatrix}
 - 相对位姿误差平移部分
   只需要将$\mathrm{RPE}$的$\log$换成$\mathrm{trans}$再去掉$^\lor$即可
 
+## 非线性优化
+### 状态估计
+批量方法主要将从0时刻到$k$时刻的所有输入和观测数据放一起，带回算力中心统一处理，这正是$\text{SfM}$的主流做法，但是这种做法不实时，我们先介绍批量优化方法
+记从1到$N$的所有时刻，有$M$个路标点，所有时刻的机器人位姿和路标点坐标为：
+$$x = {x_1, \cdots, x_N},y = {y_1, \cdots, y_N}$$
+类似定义$u$是所有时刻的输入，$z$是所有时刻的观测数据，于是对机器人状态的估计，就是在已知$u,z$的条件下，求状态$x,y$的条件概率分布（实际上类似于点云分布，点越密集的地方小车越有可能在那里，在这里就是概率越高的地方小车越有可能在那里）：
+$$P(x,y|z,u)$$
+不知道输入的情况下也是相当于估计$P(x,y|z)$，此问题也是$\text{SfM}$，由贝叶斯公式：
+$$P(x,y|z,u) = \cfrac{P(z,u|x,y)P(x,y)}{P(z,u)} \propto P(z,u|x,y)P(x,y)$$
+这里最右边的式子第一因子被称为**似然**$(\text{Likehood})$，第二因子被称为**先验**，于是最左边的式子就被称为**后验**了，有：
+$$(x,y)^*_{\text{MAP}} = \text{arg max}P(x,y|z,u) = \text{arg max}P(z,u|x,y)P(x,y)$$
+如果没有了先验（不知道机器人的位姿或路标位置），那么就可以求解最大似然估计：
+$$(x,y)^*_{\text{MLE}} = \text{arg max}P(z,u|x,y)$$
+这里的似然可以理解为在某个位姿下，能产生怎样的观测数据
+
+#### 批量状态估计
+回到观测方程$z_{k,j} = h(y_j,x_k) + v_{k,j}$，我们假设噪声项$v_k \sim \mathcal{N}(0, \boldsymbol{Q}_{k,j})$（即满足正态分布），所以有：
+$$P(z_{j,k}|x_k,y_j) = N(h(y_j,x_k), \boldsymbol{Q}_{k,j})$$
+考虑正态分布的概率密度函数展开形式取负对数后，可以得到：
+$$(x_k,y_j)^* = \text{arg min}((z_{k,j} - h(x_k,y_k))^T\boldsymbol{Q}^{-1}_{k,j}(z_{k,j} - h(x_k,y_j)))$$
+该式等价于最小化误差的一个二次型，这个二次型称为**马哈拉诺比斯距离**，也称**马氏距离**，其中$\boldsymbol{Q}^{-1}_{k,j}$称为**信息矩阵**，即高斯分布协方差矩阵之逆
+我们定义输入和观测数据与模型之间的误差：
+$$e_{u,k} = x_k - f(x_{k - 1},u_k) \\
+e_{z,j,k} = z_{j,k} - h(x_k, y_j)$$
+我们各时刻的输入和观测均独立，同时输入与观测也是独立的，有：
+$$P(z,u|x,y) = \prod\limits_k P(u_k|x_{k - 1},x_k) \prod\limits_{k,j} P(z_{k,j} | x_k,y_j)$$
+之后利用负对数，我们能得到一个最小二乘问题：
+$$\min J(x,y) = \sum\limits_k e^T_{u,k}\boldsymbol{R}^{-1}_k e_{u,k} + \sum\limits_k \sum\limits_j e^T_{z,k,j}\boldsymbol{Q}^{-1}_{k,j}e_{z,k,j}$$
+
+#### 非线性最小二乘
+对于一个简单的最小二乘问题：
+$$\min_x F(x) = \cfrac{1}{2}||f(x)||^2_2$$
+其中$f$是任意标量非线性函数$f(x):\mathbb{R}^n \mapsto \mathbb{R}$
+我们只需要求解$\cfrac{dF}{dx} = 0$这个方程即可，之后逐个比较函数值大小就能得到想要的极值，如果$f$是简单的线性函数，那么这个问题就是简单的线性最小二乘问题，然而若其为非线性函数，则需要用**迭代**的方式，从一个初始值出发使目标函数下降，转化为一个不断寻找下降增量$\Delta x_k$的问题，具体步骤就是：
+- 1. 给定某个初始值$x_0$
+- 2. 对于第$k$次迭代，寻找一个增量$\Delta x_k$，使得$||f(x_k + \Delta x_k)||^2_2$达到极小值
+- 3. 若$\Delta x_k$足够小，则停止（求解后的$\Delta x_k$，此时意味着结果和上一次相差极小）
+- 4. 否则，令$x_{k + 1} = x_k + \Delta x_k$，回到步骤2
+
+##### 一阶和二阶梯度法
+考虑第$k$次迭代，在$x_k$处进行泰勒展开：
+$$F(x_k + \Delta x_k) \approx F(x_k) + \boldsymbol{J}(x_k)^T\Delta x_k + \cfrac{1}{2}\Delta x^T_k \boldsymbol{H}(x_k)\Delta x_k$$
+其中$\boldsymbol{J}(x_k)$是$F(x)$关于$x$的一阶导数，也称梯度、雅可比矩阵，$\boldsymbol{H}$则是二阶导数，也称**海塞**矩阵，我们再指定一个步长$\lambda$和方向（梯度方向的反向$\Delta x^* = -\boldsymbol{J}(x_k)$），就变成了最速下降法，此时增量方程可简写为：
+$$\Delta x^* = \text{arg min}(F(x) + \boldsymbol{J}(x)^T\Delta x + \cfrac{1}{2}\Delta x^T \boldsymbol{H} \Delta x)$$
+求右侧等式关于$\Delta x$的导数并令其为0，得到：
+$$\boldsymbol{J} + \boldsymbol{H}\Delta x = 0 \Rightarrow \boldsymbol{H}\Delta x = -\boldsymbol{J}$$
+这样我们得到了增量，该方法又称为**牛顿法**
+
+##### 高斯-牛顿法
+由于牛顿法存在容易走出锯齿路线与增加过多迭代次数的问题，所以高斯-牛顿法反而是另一个不错的选择，它选择一阶泰勒展开$f(x)$而不是$F(x)$，展开后能得到：
+$$\Delta x^* = \text{arg } \min_{\Delta x} \cfrac{1}{2}||f(x) + \boldsymbol{J}(x)^T \Delta x||^2_2$$
+再将平方展开上式就得到：
+$$\cfrac{1}{2}(||f(x)||^2_2 + 2f(x)\boldsymbol{J}(x)^T\Delta x + \Delta x^T\boldsymbol{J}(x)\boldsymbol{J}(x)^T \Delta x)$$
+这实际上是一个QP问题，因为其是一个很明显的二次型最优化问题，所以每次迭代都在求解一个无约束QP问题（所以我们能直接用`Eigen`库的`ldlt().solve()`来求解），令其为0可以得到：
+$$\boldsymbol{J}(x)\boldsymbol{J}^T(x)\Delta x = -\boldsymbol{J}(x)f(x)$$
+得到一个**增量方程**，也称高斯牛顿方程、正规方程，记左边的系数为$\boldsymbol{H}(x)$，右边定义为$g(x)$
+整个迭代过程的开始和结束是一样的，只不过中间步骤换为了先求解雅可比矩阵和误差，再求解上述得到的增量方程
+然而这个方法如果遇到了$\boldsymbol{JJ}^T$为奇异矩阵或者病态矩阵（因为其只有半正定性）时稳定性较差，如果假设其永远正定，那么可能还会导致更夸张的事态
+
+##### 列文伯格-马夸尔特方法
+为了解决$\boldsymbol{JJ}^T$非正定（不过它至少一定是半正定）导致的解错误问题，列文伯格-马夸尔特方法通过将$\boldsymbol{H}$改为$\boldsymbol{JJ}^T + \lambda I$，只要$\lambda>0$，那么$\boldsymbol{H}$就是正定的。先换个角度来说，问题的实际上出在高斯牛顿法算出来的$\Delta x$没有约束范围，导致出现问题，所以我们可以先给这个解添加一个范围，称为**信赖区域**，区域内的二阶近似有效，否则无效，我们通过定义一个指标$\rho$来刻画近似的好坏程度：
+$$\rho = \cfrac{f(x + \Delta x) - f(x)}{\boldsymbol{J}(x)^T \Delta x}$$
+分子是实际函数下降的值，分母是近似模型下降的值，如果$\rho$接近$1$，则近似是好的，可以放大近似范围，反之则是坏的，缩小近似范围，经过改良后的算法步骤是：
+- 1. 给定初始值$x_0$与初始优化半径$\mu$
+- 2. 对于第$k$次迭代，求解
+    $$\min_{\Delta x_k} \cfrac{1}{2}||f(x_k) + \boldsymbol{J}(x_k)^T \Delta x_k||^2, \text{s.t. }||\boldsymbol{D}\Delta x_k||^2 \leq \mu$$
+    其中$\mu$是信赖半径，$\boldsymbol{D}$为系数矩阵
+- 3. 计算$\rho$
+- 4. 若$\rho > \cfrac{3}{4}$，则设置$\mu = 2\mu$，若$\rho < \cfrac{1}{4}$，则设置$\mu = 0.5\mu$
+- 5. 若$\rho$大于某阈值，则认为近似可行，令$x_{k + 1} = x_k + \Delta x_k$
+- 6. 判断算法是否收敛，不收敛返回第二步，否则结束

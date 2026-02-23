@@ -33,7 +33,7 @@ $$其中矩阵$\boldsymbol{Q,R}$是**调节矩阵**，都是对角矩阵，矩�
 二次规划的一般形式是求解
 $$
 \boldsymbol{z}^T\boldsymbol{Qz}+\boldsymbol{C}^T\boldsymbol{z}
-$$这种二次型式子的最小值，当$\boldsymbol{Q}$为对角矩阵时，上述矩阵经过合理的换元变形能化为$\boldsymbol{A}^T\boldsymbol{A\hat{x}}=\boldsymbol{A}^T\boldsymbol{b}$型，这就是一个最小二乘法解决的**最小二乘问题**，我们从头推导这个公式
+$$这种二次型式子的最小值，当$\boldsymbol{Q}$为对角矩阵时，上述矩阵经过合理的换元变形能化为$\boldsymbol{A}^T\boldsymbol{A\hat{x}}=\boldsymbol{A}^T\boldsymbol{b}$型，这就是一个最小二乘法解决的**最小二乘问题**$(\text{LS})$，最小二乘问题形式上和QP是一样的，不同在于LS通常无约束，同时后面推导的$\boldsymbol{H}$必须是正定或半正定的，而QP没有要求，我们从头推导这个公式
 我们规定$u_{i|j}$表示在$j$时刻预测时预测到的$i$时刻时的输入，同理定义$x_{i|j}$
 在$k$时刻，我们有一个预测区间$N$，我们需要得到：
 $$
