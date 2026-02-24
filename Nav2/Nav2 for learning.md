@@ -2635,3 +2635,6 @@ smoother_server:
 确保插件名称是正确的，然后去`bt_navigator`启动bt，随后编译运行应该能看到小车按照平滑路径走了，如果想要更明显的效果，可以可视化`/plan_smoothed`话题，这是小车平滑后的路径，设其为红色，应该可以看到例：
 ![alt text](Image//image-16.png)
 有平滑效果
+
+#### $\text{B-Spline}算法$
+$$J_{total} = \frac{1}{2} \mathbf{P}^T \underbrace{(\lambda_s \mathbf{H}_{smooth} + w_g \mathbf{I})}_{\text{二次项矩阵 } \mathbf{H}_{QP}} \mathbf{P} + \underbrace{(-w_g \mathbf{P}_{ref})^T}_{\text{一次项向量 } \mathbf{f}_{QP}^T} \mathbf{P}$$

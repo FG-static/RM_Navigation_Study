@@ -103,6 +103,10 @@ $$
 $$
 J = \boldsymbol{G} + 2\boldsymbol{f} \boldsymbol{U}_k + \boldsymbol{U}_k^T \boldsymbol{H} \boldsymbol{U}_k
 $$常数项（即$\boldsymbol{G}$）一般不影响最终求解结果，所以我们只关注后两项，和上述形式是一样的
+于是最后我们只需要调整适当的$\boldsymbol{Q,R,F}$参数即可
+- 1. $\boldsymbol{Q}$调大，更信任路径；调小，允许有偏离路径的行为
+- 2. $\boldsymbol{R}$调大，通过惩罚减少变化的增量大小；调小，完全信任电机响应能力，反应迅速灵敏
+- 3. $\boldsymbol{F}$调大，可能在终点前迅速大幅度偏转变速回正；调小，可能无法达到理想的终点位姿
 
 ## $\text{PID}$
 ### 基本概念
