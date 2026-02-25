@@ -2637,4 +2637,486 @@ smoother_server:
 有平滑效果
 
 #### $\text{B-Spline}算法$
-$$J_{total} = \frac{1}{2} \mathbf{P}^T \underbrace{(\lambda_s \mathbf{H}_{smooth} + w_g \mathbf{I})}_{\text{二次项矩阵 } \mathbf{H}_{QP}} \mathbf{P} + \underbrace{(-w_g \mathbf{P}_{ref})^T}_{\text{一次项向量 } \mathbf{f}_{QP}^T} \mathbf{P}$$
+可以利用b样条曲线进行平滑，其轨迹函数可表示为：
+$$P(t) = \cfrac{1}{6}\begin{bmatrix}
+    t^3 & t^2 & t & 1
+\end{bmatrix}\begin{bmatrix}
+    -1 & 3 & -3 & 1 \\
+    3 & -6 & 3 & 0 \\
+    -3 & 0 & 3 & 0 \\
+    1 & 4 & 1 & 0
+\end{bmatrix}\begin{bmatrix}
+    P_0 \\
+    P_1 \\ 
+    P_2 \\ 
+    P_3
+\end{bmatrix}$$
+所以对于任意四个控制点$P_i,P_{i+1},P_{i+2},P_{i+3}$，我们可以写成如下形式：
+$$P(t) = \boldsymbol{TMP}_i,t\in[0, 1]
+$$其中$\boldsymbol{M}$为$\cfrac{1}{6}$乘中间的基矩阵，我们平滑的目标是设计目标代价函数：
+$$J_{smooth} = \int^1_0||P''(t)||^2dt
+$$并使其最小，将轨迹函数的二阶导展开带入积分后得到：
+$$J_{smooth} = \boldsymbol{P}_i^T \boldsymbol{M}^T \left( \int_{0}^{1} \boldsymbol{T}''^T \boldsymbol{T}'' dt \right) \boldsymbol{M} \boldsymbol{P}_i$$
+中间的积分项实际上是一个常数矩阵$\boldsymbol{N} = \begin{bmatrix}
+    12 & 6 & 0 & 0 \\
+    6 & 4 & 0 & 0 \\
+    0 & 0 & 0 & 0 \\
+    0 & 0 & 0 & 0
+\end{bmatrix}$，我们记$\text{Hessian}$矩阵$\boldsymbol{Q} = \boldsymbol{M}^T\boldsymbol{NM}$，在经过$\cfrac{1}{36}$缩放后写入代码中可为
+```cpp
+const double Q_data[4][4] = {
+    { 0.333333, -0.500000,  0.000000,  0.166667},
+    {-0.500000,  1.000000, -0.500000,  0.000000},
+    { 0.000000, -0.500000,  1.000000, -0.500000},
+    { 0.166667,  0.000000, -0.500000,  0.333333}
+};
+```
+另外，还需要一个引导代价防止平滑后的路径偏离原始路径过多：
+$$J_{guide} = \sum_{i=1}^n (P_i - P_{ref,i})^2 = \boldsymbol{P}^T \boldsymbol{I} \boldsymbol{P} - 2 \boldsymbol{P}_{ref}^T \boldsymbol{P} + \text{const}$$
+随后我们将两个代价函数合并，并使用平滑权重系数和引导权重系数组成一个最终代价：
+$$J_{total} = w_s\sum J_{smooth} + w_g J_{guide}$$
+它可以写成一个qp问题的形式：
+$$J_{total} = \frac{1}{2} \boldsymbol{P}^T \underbrace{(w_s \boldsymbol{H}_{smooth} + w_g \boldsymbol{I})}_{\text{二次项矩阵 } \boldsymbol{H}_{QP}} \boldsymbol{P} + \underbrace{(-w_g \boldsymbol{P}_{ref})^T}_{\text{一次项向量 } \boldsymbol{f}_{QP}^T} \boldsymbol{P}$$
+其中$\boldsymbol{H}_{smooth}$为所有$4\times 4$的$\boldsymbol{Q}$进行对角线上叠加得到（不是分块放置，而是对角线上放下一个矩阵，下一格对角线再放一个，此时矩阵之间的重叠部分叠加）
+同时我们需要设立一组约束，即对于平滑后的点，若为起点或终点，必须与平滑前相同，否则设立上下边界$u,l$，保证$\boldsymbol{A} = \boldsymbol{I}$下有$l \leq \boldsymbol{AP} \leq u$
+因此在这里我们使用`osqp`库进行求解带约束的qp问题，它依赖于`Eigen`库，我们可以通过
+```bash
+sudo apt install ros-jazzy-osqp-vendor
+```
+进行安装（v0.6.x版本），也可以在 https://github.com/osqp/osqp 下载最新的版本（v1.0.0），注意不同版本之间大部分函数和使用方法不同，参考 https://osqp.org/docs/index.html 进行接口迁移或者查询使用方法，在这里我们使用v0.6.x版本，在这里需要注意矩阵$\boldsymbol{A}$和$\boldsymbol{H}_{QP}$必须得是$\text{CSC}$矩阵的形式
+`bspline_smoother.hpp`：
+```cpp
+#ifndef MY_NAV2_SMOOTHER__BSPLINE_SMOOTHER
+#define MY_NAV2_SMOOTHER__BSPLINE_SMOOTHER
+
+#include <vector>
+#include <memory>
+#include <string>
+#include "Eigen/Dense"
+#include "Eigen/Sparse"
+
+#include "nav2_costmap_2d/costmap_subscriber.hpp"
+#include "nav2_costmap_2d/footprint_subscriber.hpp"
+#include "nav2_core/smoother.hpp"
+#include "rclcpp/rclcpp.hpp"
+#include "nav_msgs/msg/path.hpp"
+#include "nav2_util/lifecycle_node.hpp"
+#include "nav2_util/node_utils.hpp"
+#include "nav2_costmap_2d/costmap_2d_ros.hpp"
+
+namespace my_bspline_smoother {
+
+    class MyBSplineSmoother : public nav2_core::Smoother {
+
+    public:
+
+        MyBSplineSmoother() = default;
+        ~MyBSplineSmoother() override = default;
+
+        void configure(
+            const rclcpp_lifecycle::LifecycleNode::WeakPtr & parent,
+            std::string name, 
+            std::shared_ptr<tf2_ros::Buffer> /*tf*/,
+            std::shared_ptr<nav2_costmap_2d::CostmapSubscriber> costmap_sub,
+            std::shared_ptr<nav2_costmap_2d::FootprintSubscriber> /*footprint_sub*/) override;
+
+        void cleanup() override;
+        void activate() override;
+        void deactivate() override;
+
+        bool smooth(
+            nav_msgs::msg::Path &path,
+            const rclcpp::Duration &/*max_time*/) override;
+    private:
+
+        // 平滑算法
+        void applyBSplineAlgorithm(nav_msgs::msg::Path &path, const nav_msgs::msg::Path &raw_path);
+        bool solveBSplineQP(
+            const std::vector<double> &p_ref_x,
+            const std::vector<double> &p_ref_y,
+            double w_s,
+            double w_g,
+            std::vector<double> &p_smooth_x,
+            std::vector<double> &p_smooth_y);
+
+        // bspline参数
+        double 
+            w_smooth_ = 10.0,
+            w_guide_ = 1.0;
+
+        const double Q_data[4][4] = {
+            { 0.333333, -0.500000,  0.000000,  0.166667},
+            {-0.500000,  1.000000, -0.500000,  0.000000},
+            { 0.000000, -0.500000,  1.000000, -0.500000},
+            { 0.166667,  0.000000, -0.500000,  0.333333}
+        };
+        nav2_util::LifecycleNode::SharedPtr node_;
+        std::string name_;
+        std::shared_ptr<nav2_costmap_2d::CostmapSubscriber> costmap_sub_;
+    };
+} // my_bspline_smoother
+
+#endif // MY_NAV2_SMOOTHER__BSPLINE_SMOOTHER
+```
+`bspline_smoother.cpp`：
+```cpp
+#include "my_nav2_smoother/bspline_smoother.hpp"
+#include "pluginlib/class_list_macros.hpp"
+#include "tf2/LinearMath/Quaternion.h"
+#include "tf2_geometry_msgs/tf2_geometry_msgs.hpp"
+
+extern "C" {
+#include "osqp/osqp.h"
+}
+
+namespace my_bspline_smoother {
+
+    void MyBSplineSmoother::configure(
+        const rclcpp_lifecycle::LifecycleNode::WeakPtr & parent,
+        std::string name, 
+        std::shared_ptr<tf2_ros::Buffer> /*tf*/,
+        std::shared_ptr<nav2_costmap_2d::CostmapSubscriber> costmap_sub,
+        std::shared_ptr<nav2_costmap_2d::FootprintSubscriber> /*footprint_sub*/
+    ) {
+            
+        costmap_sub_ = costmap_sub;
+        node_ = parent.lock();
+        name_ = name;
+
+        nav2_util::declare_parameter_if_not_declared(node_, name + ".w_smooth", rclcpp::ParameterValue(10.0));
+        nav2_util::declare_parameter_if_not_declared(node_, name + ".w_guide", rclcpp::ParameterValue(1.0));
+
+        node_->get_parameter(name + ".w_smooth", w_smooth_);
+        node_->get_parameter(name + ".w_guide", w_guide_);
+    }
+    void MyBSplineSmoother::activate() { RCLCPP_INFO(node_->get_logger(), "插件已激活"); }
+    void MyBSplineSmoother::deactivate() { RCLCPP_INFO(node_->get_logger(), "插件已停用"); }
+    void MyBSplineSmoother::cleanup() { RCLCPP_INFO(node_->get_logger(), "插件已清理"); }
+    bool MyBSplineSmoother::smooth(
+        nav_msgs::msg::Path &path,
+        const rclcpp::Duration &/*max_time*/
+    ) {
+
+        if (path.poses.size() < 4) return true;
+        nav_msgs::msg::Path raw_path = path;
+        applyBSplineAlgorithm(path, raw_path);
+
+        return true;
+    }
+    void MyBSplineSmoother::applyBSplineAlgorithm(
+        nav_msgs::msg::Path &path, 
+        const nav_msgs::msg::Path &raw_path
+    ) {
+
+        if (raw_path.poses.size() < 4) {
+            
+            path = raw_path;
+            return;
+        }
+        std::vector<double> 
+            ref_path_x,
+            ref_path_y,
+            smooth_path_x,
+            smooth_path_y;
+        for (size_t i = 0; i < raw_path.poses.size(); ++ i) {
+
+            ref_path_x.push_back(raw_path.poses[i].pose.position.x);
+            ref_path_y.push_back(raw_path.poses[i].pose.position.y);
+        }
+        solveBSplineQP(ref_path_x, ref_path_y, w_smooth_, w_guide_, smooth_path_x, smooth_path_y);
+        int n = smooth_path_x.size();
+        for (int i = 0; i < n; ++ i) {
+
+            double yaw;
+            
+            if (i < n - 1) {
+
+                yaw = std::atan2(smooth_path_y[i + 1] - smooth_path_y[i], 
+                                smooth_path_x[i + 1] - smooth_path_x[i]);
+            } else {
+
+                yaw = std::atan2(smooth_path_y[i] - smooth_path_y[i - 1], 
+                                smooth_path_x[i] - smooth_path_x[i - 1]);
+            }
+
+            // 更新位姿
+            path.poses[i].pose.position.x = smooth_path_x[i];
+            path.poses[i].pose.position.y = smooth_path_y[i];
+            tf2::Quaternion q;
+            q.setRPY(0, 0, yaw); // Roll=0, Pitch=0, Yaw=yaw
+            path.poses[i].pose.orientation = tf2::toMsg(q);
+        }
+    }
+    /**
+     * @brief 使用 B-Spline 二次规划平滑路径
+     * @param p_ref 原始参考路径的坐标序列 (x 或 y)
+     * @param w_s 平滑权重
+     * @param w_g 引导项权重
+     * @param p_smooth 输出的平滑后的坐标序列
+     * @return 成功返回true
+     */
+    bool MyBSplineSmoother::solveBSplineQP(
+        const std::vector<double> &p_ref_x,
+        const std::vector<double> &p_ref_y,
+        double w_s,
+        double w_g,
+        std::vector<double> &p_smooth_x,
+        std::vector<double> &p_smooth_y
+    ) {
+
+        RCLCPP_INFO(node_->get_logger(), "BSpline算法启动");
+        int n = p_ref_x.size();
+        if (n < 4) return false;
+
+        Eigen::SparseMatrix<double> H(n, n);
+        std::vector<Eigen::Triplet<double>> triplets;
+        for (int i = 0; i < n - 3; ++ i) {
+
+            for (int r = 0; r < 4; ++ r) {
+
+                for(int c = 0; c < 4; ++ c) {
+
+                    triplets.push_back(Eigen::Triplet<double>(i + r, i + c, w_s * Q_data[r][c]));
+                }
+            }
+        }
+
+        // 引导项
+        for (int i = 0; i < n; ++ i) {
+
+            triplets.push_back(Eigen::Triplet<double>(i, i, w_g));
+        }
+        H.setFromTriplets(triplets.begin(), triplets.end());
+
+        Eigen::VectorXd f_x(n), f_y(n);
+        for (int i = 0; i < n; ++ i) {
+            
+            f_x(i) = -w_g * p_ref_x[i];
+            f_y(i) = -w_g * p_ref_y[i];
+        }
+
+        // 边界约束
+        Eigen::VectorXd l_x(n), u_x(n), l_y(n), u_y(n);
+        for (int i = 0; i < n; ++i) {
+
+            l_x(i) = p_ref_x[i] - 1.0; 
+            u_x(i) = p_ref_x[i] + 1.0;
+            l_y(i) = p_ref_y[i] - 1.0; 
+            u_y(i) = p_ref_y[i] + 1.0;
+            if (i < 2 || i > n - 3) {
+
+                l_x(i) = p_ref_x[i];
+                u_x(i) = p_ref_x[i];
+                l_y(i) = p_ref_y[i];
+                u_y(i) = p_ref_y[i];
+            }
+        }
+        
+        // OSQP求解
+        OSQPSettings *settings = (OSQPSettings*)c_malloc(sizeof(OSQPSettings));
+        OSQPData *data = (OSQPData*)c_malloc(sizeof(OSQPData));
+        Eigen::SparseMatrix<c_float, Eigen::ColMajor, c_int> H_csc = H.triangularView<Eigen::Upper>(); // csc形式
+        Eigen::SparseMatrix<c_float, Eigen::ColMajor, c_int> A_csc(n, n);
+        A_csc.setIdentity();
+        A_csc.makeCompressed();
+        H_csc.makeCompressed();
+
+        data->n = n; // 变量
+        data->m = n; // 约束
+        data->P = csc_matrix( // csc矩阵信息
+            n, n,
+            H_csc.nonZeros(),
+            H_csc.valuePtr(),
+            (c_int*)H_csc.innerIndexPtr(),
+            (c_int*)H_csc.outerIndexPtr()
+        );
+        data->q = f_x.data(); // 一次项
+        data->A = csc_matrix( // 约束矩阵
+            n, n, 
+            A_csc.nonZeros(),
+            A_csc.valuePtr(),
+            (c_int*)A_csc.innerIndexPtr(),
+            (c_int*)A_csc.outerIndexPtr()
+        );
+
+        // 约束向量
+        data->l = l_x.data();
+        data->u = u_x.data();
+
+        // 开始求解
+        osqp_set_default_settings(settings);
+        settings->warm_start = 1;
+        settings->verbose = 0; // 生产环境关闭日志
+
+        OSQPWorkspace *work = nullptr;
+        c_int status = osqp_setup(&work, data, settings);
+        bool success = false;
+        if (status == 0 && work) {
+
+            osqp_solve(work);
+            if (work->info->status_val >= 0 && work->solution) {
+
+                p_smooth_x.resize(n);
+                for (int i = 0; i < n; ++ i) {
+
+                    p_smooth_x[i] = work->solution->x[i];
+                }
+            }
+            osqp_update_lin_cost(work, f_y.data());
+            osqp_update_bounds(work, l_y.data(), u_y.data());
+            osqp_solve(work);
+            if (work->info->status_val >= 0 && work->solution) {
+
+                p_smooth_y.resize(n);
+                for (int i = 0; i < n; ++ i) {
+
+                    p_smooth_y[i] = work->solution->x[i];
+                }
+                success = true;
+            }
+        } else {
+
+            RCLCPP_INFO(node_->get_logger(), "OSQP初始化失败");
+        }
+
+        // 释放
+        if (work) osqp_cleanup(work);
+        if (data) {
+
+            if (data->P) c_free(data->P);
+            if (data->A) c_free(data->A);
+            c_free(data);
+        }
+        if (settings) c_free(settings);
+
+        return success;
+    }
+} // my_bspline_smoother
+
+PLUGINLIB_EXPORT_CLASS(my_bspline_smoother::MyBSplineSmoother, nav2_core::Smoother)
+```
+注意，使用`osqp`最好`osqp`和`osqp_vendor`一起写入cmake文件中，为防止出现问题，可以尝试手动链接`osqp::osqp`
+`CmakeLists.txt`：
+```c
+cmake_minimum_required(VERSION 3.8)
+project(my_nav2_smoother)
+
+if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+  add_compile_options(-Wall -Wextra -Wpedantic)
+endif()
+
+# find dependencies
+find_package(ament_cmake REQUIRED)
+find_package(rclcpp REQUIRED)
+find_package(nav2_core REQUIRED)
+find_package(nav2_util REQUIRED)
+find_package(nav2_costmap_2d REQUIRED)
+find_package(nav_msgs REQUIRED)
+find_package(geometry_msgs REQUIRED)
+find_package(pluginlib REQUIRED)
+find_package(tf2 REQUIRED)
+find_package(tf2_ros REQUIRED)
+find_package(tf2_geometry_msgs REQUIRED)
+find_package(Eigen3 REQUIRED)
+find_package(osqp_vendor REQUIRED)
+find_package(osqp REQUIRED)
+
+# 添加头文件目录
+include_directories(
+  include
+  ${Eigen3_INCLUDE_DIRS}
+)
+
+# 编译动态库 (Shared Library)
+add_library(${PROJECT_NAME}_lib SHARED
+  src/bspline_smoother.cpp
+)
+ament_target_dependencies(${PROJECT_NAME}_lib
+  rclcpp
+  nav2_core
+  nav2_util
+  nav2_costmap_2d
+  nav_msgs
+  geometry_msgs
+  pluginlib
+  tf2
+  tf2_ros
+  tf2_geometry_msgs
+  osqp
+  Eigen3
+)
+
+target_link_libraries(${PROJECT_NAME}_lib
+  osqp::osqp
+)
+
+pluginlib_export_plugin_description_file(nav2_core plugins.xml)
+
+install(TARGETS ${PROJECT_NAME}_lib
+  ARCHIVE DESTINATION lib
+  LIBRARY DESTINATION lib
+  RUNTIME DESTINATION bin
+)
+
+install(DIRECTORY include/
+  DESTINATION include/
+)
+
+# 导出依赖以供其他包使用
+ament_export_include_directories(include)
+ament_export_libraries(${PROJECT_NAME}_lib)
+ament_export_dependencies(nav2_core nav2_util pluginlib rclcpp)
+
+if(BUILD_TESTING)
+  find_package(ament_lint_auto REQUIRED)
+  # the following line skips the linter which checks for copyrights
+  # comment the line when a copyright and license is added to all source files
+  set(ament_cmake_copyright_FOUND TRUE)
+  # the following line skips cpplint (only works in a git repo)
+  # comment the line when this package is in a git repo and when
+  # a copyright and license is added to all source files
+  set(ament_cmake_cpplint_FOUND TRUE)
+  ament_lint_auto_find_test_dependencies()
+endif()
+
+ament_package()
+```
+`package.xml`：
+```xml
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>my_nav2_smoother</name>
+  <version>0.0.0</version>
+  <description>TODO: Package description</description>
+  <maintainer email="meis38@126.com">goose</maintainer>
+  <license>TODO: License declaration</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>nav2_core</depend>
+  <depend>nav2_util</depend>
+  <depend>nav2_costmap_2d</depend>
+  <depend>nav_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>pluginlib</depend>
+  <depend>tf2</depend>
+  <depend>tf2_ros</depend>
+  <depend>tf2_geometry_msgs</depend>
+  <depend>eigen</depend>
+  <depend>osqp</depend>
+  <depend>osqp_vendor</depend>
+
+  <test_depend>ament_lint_auto</test_depend>
+  <test_depend>ament_lint_common</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+    <nav2_core plugin="${prefix}/plugins.xml" />
+  </export>
+</package>
+```
+`plugins.xml`和之前的差不多，这里不多展示
+随后编译运行，规划好路径后应该能看到较为平滑的红色路径：
+![alt text](Image//image-22.png)
