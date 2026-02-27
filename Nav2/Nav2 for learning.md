@@ -490,6 +490,47 @@ ros2 run nav2_map_server map_saver_cli -f map1
 写一个`full_navigation.launch.py`同时启动`gazebo_sim.launch.py`、`bringup_launch.py`、rviz配置文件（打开一个新的rviz，想要保存目前rviz的面板（配置），可以选左上角$\mathrm{File>Save~Config~as}$保存`.rviz`文件到`config`目录下（这个目录记得也要通过cmake安装），在后面的rviz配置启动文件可以填这个），可能还有`slam_toolbox`、静态`map` -> `odom`转换等
 这样能显著提升效率，至于选择分支可以用一个变量`slam_mode`判断选择slam模式还是nav模式，同时也要进行对不同模式下`.yaml`文件的区分，推荐使用`IfCondition/UnlessCondition`或`PythonExpression`库
 
+##### 关于小车抖动
+这个问题主要体现在小车在amcl定位后开始运动，就会出现剧烈的坐标跳变抖动，很大程度上是因为amcl参数的设置有问题，注意以下这几个参数
+```py
+amcl:
+  ros__parameters:
+    # 里程计噪声
+    alpha1: 0.2
+    alpha2: 0.2
+    alpha3: 0.2
+    alpha4: 0.2
+    alpha5: 0.2
+    # update 触发阈值
+    update_min_a: 0.05    # 旋转 0.05 rad (~3°) 即更新
+    update_min_d: 0.05    # 直移 5cm 即更新
+    # 粒子数
+    max_particles: 2000
+    min_particles: 500
+    …
+    laser_model_type: "likelihood_field"
+    scan_topic: /scan
+```
+这些参数较为不合理，里程计噪声（`alpha`）不要设太大，更新触发阈值更小一点，粒子数可以少一点，速度更快，`resample_interval`可以调大一点，避免一更新就重新采样，以下参数设置比较合理：
+```py
+# 减小这些，让 AMCL 对 odom 过渡更平滑
+alpha1: 0.05
+alpha2: 0.05
+alpha3: 0.05
+alpha4: 0.05
+alpha5: 0.05
+
+# 只在显著运动时更新
+update_min_a: 0.2
+update_min_d: 0.1
+resample_interval: 2
+
+# 粒子数也可缩小到几百，提高速度
+max_particles: 800
+min_particles: 200
+```
+除此之外，urdf方面的轮距、摩擦力、PID也是导致仿真不稳定的原因（类似`LaserScan`扫描物随着小车一起轻微旋转，这是gazebo仿真无法跟上rviz2导致的），利用sophus库写的轨迹误差对比可以逐渐微调这些参数
+
 ### $\mathbf{Nav2}$行为树
 #### 动作节点$-\mathbf{Action~Nodes}$
 作为动作客户端调用nav2的各个（动作）服务器
