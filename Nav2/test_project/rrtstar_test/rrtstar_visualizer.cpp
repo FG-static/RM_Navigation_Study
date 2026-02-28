@@ -236,7 +236,7 @@ void MapPlanner::planRRTStar(const cv::Point &start_pix, const cv::Point &goal_p
     tree.clear();
     tree.emplace_back(start_pt, -1, 0.0);
     found_goal = false;
-    best_cost = std::numeric_limits<double>::infinity();
+    best_cost = std::numeric_limits<double>::infinity(); // 记录找到的路径的最优代价
 
     // 在地图上标记起点和终点
     cv::circle(display_map, cv::Point(static_cast<int>(start_pt.x), static_cast<int>(start_pt.y)), 3, cv::Scalar(0,0,255), -1);
