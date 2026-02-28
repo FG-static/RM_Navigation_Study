@@ -1915,9 +1915,10 @@ python3 trajectory_saver.py
 ![alt text](Image//image-13.png)
 
 ### 全局路径规划算法
-我们也可以自己写一个规划器插件用在我们的机器人上，对于全局路径规划，我们先采用A*算法
+我们也可以自己写一个规划器插件用在我们的机器人上
 
-#### $\mathrm{OpenCV}$可视化
+#### $\text{A}^*$
+##### $\mathrm{OpenCV}$可视化
 在正式写插件之前，可以先使用opencv进行一个寻路可视化，在此之前，我们需要拥有一个用slam建的图的`.pgm`和`.yaml`文件，新建一个项目`planner_test`，对于里面的文件`astar_visualizer.hpp`：
 ```cpp
 #include "opencv2/opencv.hpp"
@@ -2123,7 +2124,7 @@ target_link_libraries(planner_test
 如果设定了正确的起点和终点，应该能看到如下图像
 ![alt text](Image//image-14.png)
 
-#### 实践
+##### 实践
 接下来我们将上述代码移植到一个规划器插件中，编写一个自定义A*路径规划器，依旧先创建功能包：
 ```bash
 ros2 pkg create --build-type ament_cmake my_nav2_planner --dependencies nav2_core pluginlib rclcpp
@@ -2358,6 +2359,900 @@ planner_server:
 类似的即可，随后编译运行，在规划了路径后可以看到
 ![alt text](Image//image-15.png)
 此时的路径是锯齿状的，我们在后面进行平滑器的编写后可以将其优化为更顺化的曲线
+
+#### $\text{RRT}^*$
+rrt*基于rrt，而rrt又基于**随机树**，随机树的核心步骤就是在一个点附近一直随机扔节点，这很明显是不明智的，到达终点的可能性极低
+在此基础上发明了$\text{RRT}$算法，即**基础随机扩展树**，它是走一步，然后在半径范围内进行一次随机采样，再走一步，再继续采样，如此往复，只要路径不被隔断，就加入树，这样确实能到达终点，但是性能损耗很大，于是有了$\text{RRT}^*$算法
+rrt*的步骤是：
+- 1. 随机采样一个点（可以设定有$10%$概率直接采样到终点）
+- 2. 在一定的搜索半径内，搜索所有邻居找到那个从起点走到邻居的累积代价最小的，然后以该邻居向该点的方向扩展一个点，距离为`step_size`
+- 3. 放下这个点后，查看上一步搜索到的邻居与该点的路径是否有障碍物或者是非法路径，再进行筛选
+- 4. 再在这个搜索半径内，进行第二次搜索，这次搜索是搜索所有邻居，如果它们的父节点改为该节点，到该节点的累积代价是否更小？是的话则替换它们的父节点，并重新计算代价
+
+重复整个步骤直到终止，而终止条件也有讲究，可以简单粗暴的定义一个`max_iterations`表示每次必须进行那么多次的步骤循环。如果要优化时间，还可以找到到达终点的路径就直接退出循环。如果要优化路径质量，可以定义一个结束后迭代的阈值，表示在找到路径后最多再进行那么多次的步骤循环就结束，当然还有各种方法，这里就以最后一种为例
+
+##### $\text{OpenCV}$可视化
+在可视化，可以先写一个轻量的程序，创建功能包`rrtstar_test`
+`rrtstar_visualizer.hpp`：
+```cpp
+#include "opencv2/opencv.hpp"
+#include <vector>
+#include <random>
+#include <functional>
+#include <limits>
+#include <string>
+#include <cmath>
+#include <algorithm>
+
+// RRT* 节点（使用世界坐标，单位 m）
+struct RRTNode {
+
+    cv::Point2d pos;
+    int parent; // 在 tree 中的索引，-1 为根
+    double cost; // 从起点到该节点的累计代价
+    RRTNode() : pos(0,0), parent(-1), cost(0.0) {}
+    RRTNode(const cv::Point2d &p, int par, double c) : pos(p), parent(par), cost(c) {}
+};
+
+class MapPlanner {
+
+public:
+
+    // 地图相关
+    cv::Mat map_img, display_map, raw_map;
+    int img_w = 200, img_h = 162;
+    double resolution = 0.05;
+    double origin_x = -5.046, origin_y = -4.64;
+
+    // RRT* 参数
+    double step_size = 1.0; // 扩展步长，单位 m
+    int max_iterations = 50000; // 最大迭代次数
+    double 
+        search_radius = 2.0, // 用于重连
+        goal_sample_rate = 0.5, // 采样直接采中目标的概率
+        goal_tolerance = 0.2, // 认为到达目标的距离阈值，单位 m
+        collision_check_resolution = 0.02; // 碰撞检查的插值分辨率，单位 m
+
+    // 树结构
+    std::vector<RRTNode> tree;
+
+    // 起点/终点（像素，double用于插值计算）
+    cv::Point2d start_pt, goal_pt;
+
+    // 随机生成器
+    std::mt19937 rng;
+    std::uniform_real_distribution<double> uni_x;
+    std::uniform_real_distribution<double> uni_y;
+
+    // 结果与状态
+    bool found_goal = false;
+    std::vector<cv::Point2d> final_path;
+    double best_cost = std::numeric_limits<double>::infinity();
+
+    // 可视化
+    cv::Mat draw_img;
+    int iteration_delay_ms = 5;
+    bool show_debug = true;
+
+    // 构造与主要接口
+    MapPlanner(const std::string &pgm_path);
+    void preprocessMap(int robot_radius_px = 4);
+
+    // 坐标转换辅助
+    cv::Point worldToMap(double wx, double wy) const;
+
+    // 规划接口：传入像素坐标的起点和终点
+    void planRRTStar(const cv::Point &start_pix, const cv::Point &goal_pix);
+
+    // 算法辅助函数
+    cv::Point2d sampleRandomPoint();
+    int nearestIndex(const cv::Point2d &p) const;
+    cv::Point2d steer(const cv::Point2d &from, const cv::Point2d &to);
+    std::vector<int> nearIndices(const cv::Point2d &p) const;
+    bool collisionFree(const cv::Point2d &a, const cv::Point2d &b) const;
+    double dist(const cv::Point2d &a, const cv::Point2d &b) const;
+    void reconstructPath(int goal_idx);
+
+    // 绘制
+    void drawTree();
+    void drawPath();
+
+    // 地图查询
+    bool isOccupiedPx(int mx, int my) const;
+    bool isInsideMapPx(int mx, int my) const;
+
+private:
+
+    void initRandomGenerators();
+};
+```
+`rrtstar_visualizer.cpp`：
+```cpp
+#include "rrtstar_visualizer.hpp"
+#include <iostream>
+#include <chrono>
+
+MapPlanner::MapPlanner(const std::string &pgm_path) {
+
+    map_img = cv::imread(pgm_path, cv::IMREAD_GRAYSCALE);
+    raw_map = map_img;
+    if (map_img.empty()) {
+        std::cerr << "Failed to load .pgm" << std::endl;
+        return;
+    }
+    img_w = map_img.cols;
+    img_h = map_img.rows;
+    display_map = map_img.clone();
+
+    initRandomGenerators();
+}
+
+/**
+ * @brief 对地图进行预处理，膨胀障碍物以考虑机器人尺寸
+ * @param robot_radius_px 机器人半径（像素）
+ * @return void
+ */
+void MapPlanner::preprocessMap(int robot_radius_px) {
+
+    cv::cvtColor(map_img, display_map, cv::COLOR_GRAY2BGR);
+    cv::Mat element = cv::getStructuringElement(cv::MORPH_RECT,
+                      cv::Size(2 * robot_radius_px + 1, 2 * robot_radius_px + 1));
+    cv::erode(map_img, map_img, element);
+}
+
+cv::Point MapPlanner::worldToMap(double wx, double wy) const {
+    int mx = static_cast<int>(std::round((wx - origin_x) / resolution));
+    int my = static_cast<int>(std::round((wy - origin_y) / resolution));
+    my = img_h - my;
+    mx = std::max(0, std::min(mx, img_w - 1));
+    my = std::max(0, std::min(my, img_h - 1));
+    return cv::Point(mx, my);
+}
+
+void MapPlanner::initRandomGenerators() {
+
+    std::random_device rd;
+    rng = std::mt19937(rd());
+    uni_x = std::uniform_real_distribution<double>(0.0, static_cast<double>(img_w));
+    uni_y = std::uniform_real_distribution<double>(0.0, static_cast<double>(img_h));
+}
+
+/**
+ * @brief 从地图范围内随机采样一个点，按照 goal_sample_rate 的概率直接返回目标点
+ * @return cv::Point2d 采样点的像素坐标（double 用于插值计算）
+ */
+cv::Point2d MapPlanner::sampleRandomPoint() {
+
+    double r = std::uniform_real_distribution<double>(0.0, 1.0)(rng);
+    if (r < goal_sample_rate) return goal_pt;
+    return cv::Point2d(uni_x(rng), uni_y(rng));
+}
+
+int MapPlanner::nearestIndex(const cv::Point2d &p) const {
+
+    int best = -1;
+    double bestd = std::numeric_limits<double>::infinity();
+    for (int i = 0; i < static_cast<int>(tree.size()); ++ i) {
+
+        double d = dist(tree[i].pos, p);
+        if (d < bestd) {
+
+            bestd = d;
+            best = i;
+        }
+    }
+    return best;
+}
+
+/**
+ * @brief 从 from 向 to 方向扩展一个新点，距离为 step_size
+ * @param from 起点（像素坐标）
+ * @param to 目标点（像素坐标）
+ * @return cv::Point2d 新点的像素坐标（double 用于插值计算）
+ */
+cv::Point2d MapPlanner::steer(const cv::Point2d &from, const cv::Point2d &to) {
+
+    double d = dist(from, to);
+    if (d <= step_size) return to;
+    cv::Point2d vec = to - from;
+    return from + vec * (step_size / d);
+}
+
+/**
+ * @brief 查找树中距离点 p 在 search_radius 范围内的所有节点索引
+ * @param p 查询点（像素坐标）
+ * @return 满足条件的节点索引列表
+ */
+std::vector<int> MapPlanner::nearIndices(const cv::Point2d &p) const {
+
+    std::vector<int> inds;
+    double r_pix = search_radius / resolution;
+    for (int i = 0; i < static_cast<int>(tree.size()); ++ i) {
+
+        if (dist(tree[i].pos, p) <= r_pix) {
+
+            inds.push_back(i);
+        }
+    }
+    return inds;
+}
+
+/**
+ * @brief 检查线段 ab 上是否存在障碍物
+ * @param a 起点（像素坐标）
+ * @param b 终点（像素坐标）
+ * @return true 如果线段上没有障碍物；false 如果存在障碍物
+ */
+bool MapPlanner::collisionFree(const cv::Point2d &a, const cv::Point2d &b) const {
+
+    double d = dist(a, b);
+    if (d < 1e-6) return !isOccupiedPx(static_cast<int>(a.x), static_cast<int>(a.y));
+    double step = collision_check_resolution / resolution;
+    int n = static_cast<int>(std::ceil(d / step));
+    for (int i = 0; i <= n; ++ i) {
+
+        double t = static_cast<double>(i) / n;
+        double x = a.x + (b.x - a.x) * t;
+        double y = a.y + (b.y - a.y) * t;
+        int mx = static_cast<int>(std::round(x));
+        int my = static_cast<int>(std::round(y));
+        if (isOccupiedPx(mx, my)) return false;
+    }
+    return true;
+}
+
+inline double MapPlanner::dist(const cv::Point2d &a, const cv::Point2d &b) const {
+
+    double 
+        dx = a.x - b.x,
+        dy = a.y - b.y;
+    return std::sqrt(dx * dx + dy * dy);
+}
+
+/**
+ * @brief 从 goal_idx 反向追踪父节点直到起点，重建路径
+ * @param goal_idx 目标节点在树中的索引
+ * @return void
+ */
+void MapPlanner::reconstructPath(int goal_idx) {
+
+    final_path.clear();
+    int idx = goal_idx;
+    while (idx != -1) {
+
+        final_path.push_back(tree[idx].pos);
+        idx = tree[idx].parent;
+    }
+    std::reverse(final_path.begin(), final_path.end());
+}
+
+/**
+ * @brief 绘制 RRT* 树结构
+ * 每条边用绿色线段表示
+ * @return void
+ */
+void MapPlanner::drawTree() {
+
+    draw_img = display_map.clone();
+    for (int i = 1; i < static_cast<int>(tree.size()); ++ i) {
+
+        cv::Point p1(static_cast<int>(tree[i].pos.x), static_cast<int>(tree[i].pos.y));
+        cv::Point p2(static_cast<int>(tree[tree[i].parent].pos.x),
+                     static_cast<int>(tree[tree[i].parent].pos.y));
+        cv::line(draw_img, p1, p2, cv::Scalar(0, 255, 0), 1);
+    }
+}
+
+/**
+ * @brief 绘制最终路径
+ * 每条边用蓝色线段表示
+ * @return void
+ */
+void MapPlanner::drawPath() {
+
+    for (size_t i = 0; i + 1 < final_path.size(); ++ i) {
+
+        cv::Point p1(static_cast<int>(final_path[i].x), static_cast<int>(final_path[i].y));
+        cv::Point p2(static_cast<int>(final_path[i + 1].x), static_cast<int>(final_path[i + 1].y));
+        cv::line(draw_img, p1, p2, cv::Scalar(255, 0, 0), 2);
+    }
+}
+
+/**
+ * @brief 检查像素坐标 (mx, my) 是否在地图范围内
+ * @param mx 像素 x 坐标
+ * @param my 像素 y 坐标
+ * @return true 如果在地图范围内；false 如果超出地图边界
+ */
+bool MapPlanner::isInsideMapPx(int mx, int my) const {
+
+    return mx >= 0 && mx < img_w && my >= 0 && my < img_h;
+}
+
+/**
+ * @brief 检查像素坐标 (mx, my) 是否被占用（障碍物）
+ * @param mx 像素 x 坐标
+ * @param my 像素 y 坐标
+ * @return true 如果被占用（障碍物）；false 如果空闲
+ */
+bool MapPlanner::isOccupiedPx(int mx, int my) const {
+
+    if (!isInsideMapPx(mx, my)) return true;
+    return map_img.at<uchar>(my, mx) == 0;
+}
+
+/**
+ * @brief RRT* 规划主函数
+ * @param start_pix 起点像素坐标
+ * @param goal_pix 终点像素坐标
+ * 流程：
+ * 1. 初始化树，添加起点
+ * 2. 循环 max_iterations 次：
+ *   a. 随机采样一个点 p
+ *   b. 找到树中距离 p 最近的节点 nearest
+ *   c. 从 nearest 向 p 方向扩展一个新节点 new_pt，距离为 step_size
+ *   d. 如果 new_pt 与 nearest 之间没有碰撞，则将 new_pt 添加到树中，父节点为 nearest，代价为 nearest 的代价加上两点距离
+ *   e. 在 new_pt 周围 search_radius 范围内找到所有节点 near_ids，尝试通过 new_pt 重连这些节点以降低代价
+ *   f. 如果 new_pt 距离目标点 goal_pt 在 goal_tolerance 范围内，则认为找到目标，添加 goal_pt 作为 new_pt 的子节点，并重建路径
+ * 3. 可选：每隔一定迭代次数显示搜索过程
+ * 4. 最终显示结果路径或失败信息
+ * @return void
+ */
+void MapPlanner::planRRTStar(const cv::Point &start_pix, const cv::Point &goal_pix) {
+
+    start_pt = cv::Point2d(start_pix.x, start_pix.y);
+    goal_pt = cv::Point2d(goal_pix.x, goal_pix.y);
+
+    tree.clear();
+    tree.emplace_back(start_pt, -1, 0.0);
+    found_goal = false;
+    best_cost = std::numeric_limits<double>::infinity(); // 记录找到的路径的最优代价
+
+    // 在地图上标记起点和终点
+    cv::circle(display_map, cv::Point(static_cast<int>(start_pt.x), static_cast<int>(start_pt.y)), 3, cv::Scalar(0,0,255), -1);
+    cv::circle(display_map, cv::Point(static_cast<int>(goal_pt.x), static_cast<int>(goal_pt.y)), 3, cv::Scalar(255,0,0), -1);
+
+    static int count = 0;
+    for (int it = 0; it < max_iterations; ++ it) {
+
+        cv::Point2d p = sampleRandomPoint();
+        int nearest = nearestIndex(p);
+        if (nearest < 0) continue;
+        cv::Point2d new_pt = steer(tree[nearest].pos, p);
+        if (!collisionFree(tree[nearest].pos, new_pt)) continue;
+        double new_cost = tree[nearest].cost + dist(tree[nearest].pos, new_pt);
+        int new_idx = tree.size();
+        tree.emplace_back(new_pt, nearest, new_cost);
+
+        // 尝试重连附近节点以降低代价
+        auto near_ids = nearIndices(new_pt);
+        for (int nid : near_ids) {
+
+            double c = tree[new_idx].cost + dist(new_pt, tree[nid].pos);
+            if (c < tree[nid].cost && collisionFree(new_pt, tree[nid].pos)) {
+
+                tree[nid].parent = new_idx;
+                tree[nid].cost = c;
+            }
+        }
+
+        // 检查是否接近目标点
+        if (dist(new_pt, goal_pt) < goal_tolerance / resolution) {
+            
+            found_goal = true;
+            // 直接将目标点作为 new_pt 的子节点添加到树中，方便路径重建
+            cv::Point2d goal_node = goal_pt;
+            double gcost = tree[new_idx].cost + dist(new_pt, goal_node);
+            tree.emplace_back(goal_node, new_idx, gcost);
+            reconstructPath(tree.size() - 1);
+            best_cost = gcost;
+            break;
+        }
+
+        // 每隔一定迭代次数显示搜索过程
+        if (show_debug && (count++ % 50) == 0) {
+
+            drawTree();
+            cv::imshow("RRT* Searching", draw_img);
+            cv::waitKey(iteration_delay_ms);
+        }
+    }
+
+    // final visualization
+    if (found_goal) {
+
+        drawTree();
+        drawPath();
+        cv::imshow("RRT* Result", draw_img);
+    } else {
+
+        std::cout << "Failed to find path in " << max_iterations << " iterations\n";
+    }
+}
+
+int main() {
+    
+    MapPlanner planner("map1.pgm");
+    planner.preprocessMap();
+
+    cv::Point start_px = planner.worldToMap(-4.5, 1.0);
+    cv::Point goal_px = planner.worldToMap(1.0, -3.0);
+    std::cout << "start pixel: " << start_px << "  goal pixel: " << goal_px << std::endl;
+
+    // slow down visualization so process is visible
+    planner.iteration_delay_ms = 30;
+    planner.show_debug = true;
+
+    planner.planRRTStar(start_px, goal_px);
+    cv::waitKey(0);
+    return 0;
+}
+```
+写好cmake文件准备好地图，编译运行后可以看到如图：
+![alt text](Image//image-23.png)
+绿色是树，蓝色是最终路径
+
+##### 实践
+rrt*在半径范围内搜索邻居仍可优化，使用$\text{KD-Tree}$或者**网格哈希索引**可以将实践复杂度优化到对数甚至常数级别，各有优缺，在这里先暂时不实现
+我们在功能包`my_rrtstar_planner`进行插件编写
+`rrtstar_planner.hpp`：
+```cpp
+#ifndef MY_RRTSTAR_PLANNER__RRTSTAR_PLANNER
+#define MY_RRTSTAR_PLANNER__RRTSTAR_PLANNER
+
+#include <memory>
+#include <string>
+#include <vector>
+#include <queue>
+#include <random>
+#include <cmath>
+
+#include "nav2_core/global_planner.hpp"
+#include "rclcpp/rclcpp.hpp"
+#include "nav_msgs/msg/path.hpp"
+#include "geometry_msgs/msg/pose_stamped.hpp"
+#include "nav2_costmap_2d/costmap_2d_ros.hpp"
+#include "nav2_util/lifecycle_node.hpp"
+#include "nav2_util/node_utils.hpp"
+
+namespace my_rrtstar_planner {
+
+    // RRT* 节点（使用世界坐标，单位 m）
+    struct RRTNode {
+
+        int pos_idx; // map坐标索引，pos_idx = y * width + x
+        int parent; // 在 tree 中的索引，-1 为根
+        double cost; // 从起点到该节点的累计代价
+        RRTNode() : pos_idx(0), parent(-1), cost(0.0) {}
+        RRTNode(int pos_idx, int par, double c) : pos_idx(pos_idx), parent(par), cost(c) {}
+    };
+
+    class MyRRTStarPlanner : public nav2_core::GlobalPlanner {
+
+    public:
+
+        MyRRTStarPlanner() = default;
+        ~MyRRTStarPlanner() override = default;
+
+        void configure(
+            const rclcpp_lifecycle::LifecycleNode::WeakPtr &parent,
+            std::string name, std::shared_ptr<tf2_ros::Buffer> /*tf*/,
+            std::shared_ptr<nav2_costmap_2d::Costmap2DROS> costmap_ros) override;
+    
+        void activate() override;
+        void deactivate() override;
+        void cleanup() override;
+
+        nav_msgs::msg::Path createPlan(
+            const geometry_msgs::msg::PoseStamped &start,
+            const geometry_msgs::msg::PoseStamped &goal,
+            std::function<bool()> /*cancel_checker*/) override;
+    private:
+
+        bool isCollisionFreePath(int idx1, int idx2); // 检查两个节点之间的路径是否碰撞
+        void updateChildrenCost(int parent_idx, double cost_delta); // 递归更新子节点代价
+
+        std::shared_ptr<tf2_ros::Buffer> tf_;
+        nav2_util::LifecycleNode::SharedPtr node_;
+        nav2_costmap_2d::Costmap2D *costmap_;
+        std::string global_frame_, name_;
+        
+        std::vector<RRTNode> tree; // RRT*树结构
+
+        // 随机生成器
+        std::mt19937 rng;
+        std::uniform_real_distribution<double> uni_x;
+        std::uniform_real_distribution<double> uni_y;
+
+        // RRT*算法参数
+        double step_size_ = 0.5; // 扩展步长，单位 m
+        int max_iterations_ = 50000; // 最大迭代次数
+        int max_iterations_after_goal_ = 1000; // 在找到目标后继续迭代以优化路径的次数
+        double 
+            search_radius_ = 2.0, // 用于重连
+            goal_sample_rate_ = 0.5, // 采样直接采中目标的概率
+            goal_tolerance_ = 0.2, // 认为到达目标的距离阈值，单位 m
+            collision_check_resolution_ = 0.02; // 碰撞检查的插值分辨率，单位 m
+    };
+} // namespace my_rrtstar_planner
+
+#endif // MY_RRTSTAR_PLANNER__RRTSTAR_PLANNER
+```
+`rrtstar_planner.cpp`
+```cpp
+#include "my_rrtstar_planner/rrtstar_planner.hpp"
+#include "nav2_core/planner_exceptions.hpp"
+#include "pluginlib/class_list_macros.hpp"
+#include "nav2_util/node_utils.hpp"
+
+#include <cmath>
+#include <unordered_map>
+
+namespace my_rrtstar_planner {
+
+    void MyRRTStarPlanner::configure(
+        const rclcpp_lifecycle::LifecycleNode::WeakPtr &parent,
+        std::string name, std::shared_ptr<tf2_ros::Buffer> /*tf*/,
+        std::shared_ptr<nav2_costmap_2d::Costmap2DROS> costmap_ros) {
+
+        node_ = parent.lock();
+        name_ = name;
+        costmap_ = costmap_ros->getCostmap();
+        global_frame_ = costmap_ros->getGlobalFrameID();
+
+        nav2_util::declare_parameter_if_not_declared(
+            node_, name_ + ".step_size", rclcpp::ParameterValue(1.0));
+        node_->get_parameter(name_ + ".step_size", step_size_);
+
+        nav2_util::declare_parameter_if_not_declared(
+            node_, name_ + ".max_iterations", rclcpp::ParameterValue(50000));
+        node_->get_parameter(name_ + ".max_iterations", max_iterations_);
+
+        nav2_util::declare_parameter_if_not_declared(
+            node_, name_ + ".search_radius", rclcpp::ParameterValue(2.0));
+        node_->get_parameter(name_ + ".search_radius", search_radius_);
+
+        nav2_util::declare_parameter_if_not_declared(
+            node_, name_ + ".goal_sample_rate", rclcpp::ParameterValue(0.5));
+        node_->get_parameter(name_ + ".goal_sample_rate", goal_sample_rate_);
+
+        nav2_util::declare_parameter_if_not_declared(
+            node_, name_ + ".goal_tolerance", rclcpp::ParameterValue(0.2));
+        node_->get_parameter(name_ + ".goal_tolerance", goal_tolerance_);
+
+        nav2_util::declare_parameter_if_not_declared(
+            node_, name_ + ".collision_check_resolution", rclcpp::ParameterValue(0.02));
+        node_->get_parameter(name_ + ".collision_check_resolution", collision_check_resolution_);
+
+        nav2_util::declare_parameter_if_not_declared(
+            node_, name_ + ".max_iterations_after_goal", rclcpp::ParameterValue(1000));
+        node_->get_parameter(name_ + ".max_iterations_after_goal", max_iterations_after_goal_);
+
+        // 初始化随机数生成器
+        rng.seed(std::random_device{}());
+        double 
+            origin_x = costmap_ros->getCostmap()->getOriginX(),
+            origin_y = costmap_ros->getCostmap()->getOriginY(),
+            size_x = costmap_ros->getCostmap()->getSizeInMetersX(),
+            size_y = costmap_ros->getCostmap()->getSizeInMetersY();
+        uni_x = std::uniform_real_distribution<double>(origin_x, origin_x + size_x);
+        uni_y = std::uniform_real_distribution<double>(origin_y, origin_y + size_y);
+
+        RCLCPP_INFO(node_->get_logger(), "自定义RRT*规划器配置完成");
+    }
+
+    void MyRRTStarPlanner::activate() { RCLCPP_INFO(node_->get_logger(), "插件已激活"); }
+    void MyRRTStarPlanner::deactivate() { RCLCPP_INFO(node_->get_logger(), "插件已停用"); }
+    void MyRRTStarPlanner::cleanup() { RCLCPP_INFO(node_->get_logger(), "插件已清理"); }
+
+    bool MyRRTStarPlanner::isCollisionFreePath(int idx1, int idx2) {
+
+        // 将地图索引转换为地图坐标，再转换为世界坐标进行检查
+        unsigned int width = costmap_->getSizeInCellsX();
+        unsigned int mx1 = idx1 % width, my1 = idx1 / width;
+        unsigned int mx2 = idx2 % width, my2 = idx2 / width;
+        
+        double wx1, wy1, wx2, wy2;
+        costmap_->mapToWorld(mx1, my1, wx1, wy1);
+        costmap_->mapToWorld(mx2, my2, wx2, wy2);
+        
+        // 在世界坐标中进行线性插值检查
+        double dist = std::sqrt((wx2 - wx1) * (wx2 - wx1) + (wy2 - wy1) * (wy2 - wy1));
+        int steps = std::max(1, static_cast<int>(dist / collision_check_resolution_));
+        
+        for (int i = 0; i <= steps; ++ i) {
+
+            double t = (steps > 0) ? static_cast<double>(i) / steps : 0.0;
+            double 
+                wx = (1 - t) * wx1 + t * wx2,
+                wy = (1 - t) * wy1 + t * wy2;
+            
+            unsigned int mx, my;
+            if (!costmap_->worldToMap(wx, wy, mx, my)) return false; // 超出地图范围
+            
+            if (costmap_->getCost(mx, my) >= 250) return false;
+        }
+        return true;
+    }
+
+    nav_msgs::msg::Path MyRRTStarPlanner::createPlan(
+        const geometry_msgs::msg::PoseStamped &start,
+        const geometry_msgs::msg::PoseStamped &goal,
+        std::function<bool()> /*cancel_checker*/) {
+
+        nav_msgs::msg::Path global_path;
+        global_path.header.frame_id = global_frame_;
+        global_path.header.stamp = node_->now();
+
+        // 坐标转换
+        unsigned int mx_start, my_start, mx_goal, my_goal;
+        if (!costmap_->worldToMap(start.pose.position.x, start.pose.position.y, mx_start, my_start) ||
+            !costmap_->worldToMap(goal.pose.position.x, goal.pose.position.y, mx_goal, my_goal)) {
+
+            RCLCPP_ERROR(node_->get_logger(), "Start or Goal is outside of costmap bounds");
+            return global_path;
+        }
+
+        // 路径规划
+        int width = costmap_->getSizeInCellsX(), 
+            height = costmap_->getSizeInCellsY();
+        int map_size = width * height;
+        // 将米为单位的参数转换为地图格子数，保持单位一致
+        double resolution = costmap_->getResolution();
+        double step_size_cells = step_size_ / resolution;
+        double search_radius_cells = search_radius_ / resolution;
+        double goal_tolerance_cells = goal_tolerance_ / resolution;
+
+        int start_idx = my_start * width + mx_start,
+            goal_idx = my_goal * width + mx_goal;
+
+        tree.clear();
+        tree.emplace_back(start_idx, -1, 0.0); // 将起点加入树中，父节点索引为-1，代价为0
+        double best_cost = std::numeric_limits<double>::infinity(); // 记录找到的路径的最优代价
+        int goal_node_idx = -1; // 记录找到的目标节点在树中的索引
+
+        bool found_path = false;
+
+        // 开始寻路
+        int stop_iter = 0; // 优化迭代计数器
+        // 记录算法耗时
+        auto start_time = std::chrono::steady_clock::now();
+        for (int iter = 0; iter < max_iterations_; ++ iter) {
+
+            // 如果找到更优路径，更新 best_cost 和 found_path
+            double r = std::uniform_real_distribution<double>(0.0, 1.0)(rng);
+            int sample_idx; // 采样点在地图中的索引
+            if (r < goal_sample_rate_) sample_idx = goal_idx; // 以一定概率直接采样目标点
+            else {
+
+                double rx = uni_x(rng), ry = uni_y(rng);
+                unsigned int mx, my;
+                if (!costmap_->worldToMap(rx, ry, mx, my)) continue; // 采样点在地图外，丢弃
+                // 如果采样点落在障碍上也丢弃
+                if (costmap_->getCost(mx, my) >= 250) continue;
+                sample_idx = my * width + mx;
+            }
+
+            // 在搜索半径内找到代价最小的节点作为父节点
+            int best_parent_idx = 0; // 默认为树的第一个节点（起点）
+            double best_parent_cost = std::numeric_limits<double>::infinity();
+            
+            for (size_t i = 0; i < tree.size(); ++ i) {
+
+                unsigned int mx, my; // 其他节点在地图中的坐标
+                my = tree[i].pos_idx / width;
+                mx = tree[i].pos_idx % width;
+                double 
+                    ddx = mx - (sample_idx % width), ddy = my - (sample_idx / width),
+                    dist_to_sample = sqrt(ddx * ddx + ddy * ddy);
+                
+                if (dist_to_sample < search_radius_cells) {
+
+                    // TODO：KD-Tree优化或网格哈希算法优化
+                    double cost_via_this_node = tree[i].cost + dist_to_sample;
+                    
+                    // 检查这条路径是否碰撞
+                    if (!isCollisionFreePath(tree[i].pos_idx, sample_idx)) continue;
+                    
+                    if (cost_via_this_node < best_parent_cost) {
+
+                        best_parent_cost = cost_via_this_node;
+                        best_parent_idx = i;
+                    }
+                }
+            }
+            
+            unsigned int sample_mx = sample_idx % width;
+            unsigned int sample_my = sample_idx / width;
+
+            // 从选择的最优父节点向采样点扩展，在地图坐标中计算方向向量（格子单位）
+            unsigned int parent_mx, parent_my;
+            parent_my = tree[best_parent_idx].pos_idx / width;
+            parent_mx = tree[best_parent_idx].pos_idx % width;
+
+            double 
+                dx = sample_mx - parent_mx, dy = sample_my - parent_my,
+                dist = sqrt(dx * dx + dy * dy);
+            if (dist > step_size_cells && dist > 0.0) {
+                dx *= step_size_cells / dist;
+                dy *= step_size_cells / dist;
+            }
+
+            // 计算新的地图坐标，确保在整数范围内
+            unsigned int 
+                new_mx = parent_mx + static_cast<int>(round(dx)),
+                new_my = parent_my + static_cast<int>(round(dy));
+            
+            // 检查是否在地图范围内
+            if (new_mx >= width || new_my >= height) continue;
+                
+            int new_idx = new_my * width + new_mx;
+
+            // 如果没有移动则跳过
+            if (new_idx == tree[best_parent_idx].pos_idx) continue;
+
+            // 检查新节点是否与障碍物碰撞
+            if (costmap_->getCost(new_mx, new_my) >= 250)  continue; // 新节点是障碍物，丢弃
+
+            // 检查从最优父节点到新节点的路径是否碰撞
+            if (!isCollisionFreePath(tree[best_parent_idx].pos_idx, new_idx)) continue;
+
+            // 将新节点加入树中
+            double cost_to_new_node = tree[best_parent_idx].cost + sqrt(dx * dx + dy * dy);
+            tree.emplace_back(new_idx, best_parent_idx, cost_to_new_node);
+
+            // 重连附近节点 Rewire
+            for (size_t i = 0; i < tree.size() - 1; ++ i) { // 不包括刚加入的新节点
+
+                unsigned int curr_mx, curr_my;
+                curr_my = tree[i].pos_idx / width;
+                curr_mx = tree[i].pos_idx % width;
+
+                double 
+                    ddx = curr_mx - new_mx, ddy = curr_my - new_my,
+                    dist_to_new_node = sqrt(ddx * ddx + ddy * ddy);
+
+                if (dist_to_new_node < search_radius_cells) {
+
+                    // TODO：KD-Tree优化或网格哈希算法优化
+                    double cost_via_new_node = cost_to_new_node + dist_to_new_node;
+
+                    if (cost_via_new_node < tree[i].cost) { // 通过新节点到达该节点更优，尝试重连
+
+                        bool is_collision_free_path =
+                            isCollisionFreePath(tree[i].pos_idx, new_idx);
+
+                        if (is_collision_free_path) {
+                            
+                            double old_cost = tree[i].cost;
+                            tree[i].parent = tree.size() - 1; // 更新父节点索引
+                            tree[i].cost = cost_via_new_node; // 更新代价
+                            
+                            // 递归更新该节点所有子节点的代价
+                            double cost_delta = cost_via_new_node - old_cost;
+                            updateChildrenCost(i, cost_delta);
+                        }
+                    }
+                }
+            }
+
+            // 检查是否到达目标点附近
+            unsigned int goal_mx, goal_my;
+            goal_my = goal_idx / width;
+            goal_mx = goal_idx % width;
+
+            double ddx_goal = goal_mx - new_mx, ddy_goal = goal_my - new_my;
+            double dist_to_goal_sqrd =
+            ddx_goal * ddx_goal + ddy_goal * ddy_goal;
+
+            if (dist_to_goal_sqrd < goal_tolerance_cells * goal_tolerance_cells) {
+
+                // 检查到目标的路径是否碰撞
+                if (isCollisionFreePath(new_idx, goal_idx)) {
+
+                    found_path = true;
+                    if (stop_iter == 0) RCLCPP_INFO(node_->get_logger(), "RRT* found a path to the goal in %d iterations, now optimizing...", iter + 1);
+                    RCLCPP_INFO(node_->get_logger(), "RRT* successfully found a path to the goal in %d iterations", iter + 1);
+                    double cost_to_goal = cost_to_new_node + std::sqrt(dist_to_goal_sqrd);
+                    if (cost_to_goal < best_cost) {
+
+                        best_cost = cost_to_goal;
+                        goal_node_idx = tree.size() - 1; // 记录新节点在树中的索引
+                    }
+                }
+            }
+            if (found_path) {
+
+                stop_iter ++;
+
+                if (stop_iter >= max_iterations_after_goal_) {
+
+                    RCLCPP_INFO(node_->get_logger(), "RRT* optimization finished after %d iterations", iter + 1);
+                    break;
+                }
+            }
+        }
+        // 记录算法耗时
+        auto end_time = std::chrono::steady_clock::now();
+        auto duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count();
+        RCLCPP_INFO(node_->get_logger(), "RRT* planning completed in %ld ms", duration_ms);
+
+        if (found_path && goal_node_idx != -1) {
+
+            std::vector<int> path_;
+            int curr_idx = goal_node_idx;
+            while (curr_idx != -1) {
+
+                path_.push_back(tree[curr_idx].pos_idx);
+                curr_idx = tree[curr_idx].parent;
+            }
+            std::reverse(path_.begin(), path_.end());
+            
+            // 添加目标点
+            path_.push_back(goal_idx);
+
+            // 线性插值生成全局路径
+            for (size_t i = 0; i < path_.size() - 1; ++ i) {
+
+                unsigned int mx1 = path_[i] % width, my1 = path_[i] / width;
+                unsigned int mx2 = path_[i + 1] % width, my2 = path_[i + 1] / width;
+
+                double wx1, wy1, wx2, wy2;
+                costmap_->mapToWorld(mx1, my1, wx1, wy1);
+                costmap_->mapToWorld(mx2, my2, wx2, wy2);
+
+                double dist = std::hypot(wx2 - wx1, wy2 - wy1);
+                // 根据距离和碰撞检查分辨率计算插值点的数量，确保路径平滑且足够密集进行碰撞检查
+                int steps = std::max(1, static_cast<int>(dist / collision_check_resolution_));
+
+                for (int j = 0; j < steps; ++ j) {
+
+                    double t = static_cast<double>(j) / steps;
+                    double 
+                        wx = (1 - t) * wx1 + t * wx2,
+                        wy = (1 - t) * wy1 + t * wy2;
+
+                    geometry_msgs::msg::PoseStamped pose;
+                    pose.header.frame_id = global_frame_;
+                    pose.header.stamp = node_->now();
+                    pose.pose.position.x = wx;
+                    pose.pose.position.y = wy;
+                    pose.pose.orientation.w = goal.pose.orientation.w;
+                    global_path.poses.push_back(pose);
+                }
+            }
+        } else {
+
+            global_path.poses.clear();
+            RCLCPP_WARN(node_->get_logger(), "RRT* failed to find a path from start to goal");
+        }
+        return global_path;
+    }
+
+    /**
+     * @brief 递归更新子节点的代价
+     * @param parent_idx 父节点在树中的索引
+     * @param cost_delta 父节点代价的变化量（新代价 - 旧代价）
+     * 这个函数会遍历树中所有以 parent_idx 为父节点的节点，更新它们的代价，并递归更新它们的子节点的代价
+     * @return void
+     */
+    void MyRRTStarPlanner::updateChildrenCost(int parent_idx, double cost_delta) {
+        
+        // 递归遍历所有子节点，更新它们的代价
+        for (size_t i = 0; i < tree.size(); ++ i) {
+
+            if (tree[i].parent == parent_idx) {
+
+                tree[i].cost += cost_delta;
+                updateChildrenCost(i, cost_delta); // 递归更新其子节点
+            }
+        }
+    }
+}// namespace my_rrtstar_planner
+
+PLUGINLIB_EXPORT_CLASS(my_rrtstar_planner::MyRRTStarPlanner, nav2_core::GlobalPlanner)
+```
+值的一提的是，rrt*规划的路径由于具有随机性，所以很多情况下都不是最优的，它是渐进最优的，迭代次数足够才能接近最优，一般情况下，大地图最好用rrt*，速度比a*稍快，但是如果不对上述提到的两个地方进行优化，其搜索效率可能达到a*的200倍或以上
 
 ### 平滑路径算法
 #### 梯度下降平滑算法
