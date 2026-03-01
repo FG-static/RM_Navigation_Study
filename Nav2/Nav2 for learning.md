@@ -50,7 +50,21 @@ rosdep install -y -r -q --from-paths src --ignore-src --rosdistro jazzy
 colcon build --symlink-install
 ```
 进行软链接编译
-（注意，直接进行编译可能会导致并行编译强制跑满所有内存和cpu直接卡死重启，为了避免这种情况，可以考虑设置交换内存为16~32G，同时进行限制性编译（即限制编译时只能一次编译一个项目等）例如：
+（注意，直接进行编译可能会导致并行编译强制跑满所有内存和cpu直接卡死重启，为了避免这种情况，可以考虑设置交换内存为16~32G，例如：
+```bash
+sudo swapoff /swapfile
+# 关闭/swapfile文件
+sudo fallocate -l 4G /swapfile
+# 额外增加4G的交换内存，写入/swapfile中
+sudo chmod 600 /swapfile
+sudo mkswap /swapfile
+# 格式化为swap格式
+sudo swapon /swapfile
+# 启用swapfile文件
+free -h
+# 查看交换内存
+```
+进行限制性编译（即限制编译时只能一次编译一个项目等）例如：
 ```bash
 MAKEFLAGS="-j1" colcon build --symlink-install --executor sequential --parallel-workers 1
 ```
