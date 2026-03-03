@@ -581,4 +581,120 @@ $$p^T_2\boldsymbol{K}^{-T}\boldsymbol{t}^{\land} \boldsymbol{R}\boldsymbol{K}^{-
 $$\boldsymbol{E} = \boldsymbol{t}^\land \boldsymbol{R}, \boldsymbol{F} = \boldsymbol{K}^{-T}\boldsymbol{EK}^{-1}, x^T_2\boldsymbol{E}x_1 = \boldsymbol{p}^T_2\boldsymbol{Fp}_1 = 0$$
 所以实际上问题变成了两步，求解$\boldsymbol{E,F}$后求解$\boldsymbol{R,t}$
 
-#### 本质矩阵
+##### 本质矩阵
+本质矩阵的定义是$\boldsymbol{E} = \boldsymbol{t}\land\boldsymbol{R}$，它是一个$3\times 3$矩阵，有9个未知数，它有以下三个值得注意的地方：
+- $\boldsymbol{E}$在不同尺度下是等价的，因为其满足的对极约束是等式为0的约束，乘以任何非零常数约束不变
+- 可以证明，其奇异值必定是$[\sigma, \sigma, 0]^T$的形式，这是它的**内在性质**
+- 由于平移和旋转各有3个自由度，所以$\boldsymbol{t}^\land\boldsymbol{R}$共有6个自由度，但由于尺度等价，实际上本质矩阵只有5个自由度
+
+这表明我们可以用5对点来求解它，不过如果考虑它的**尺度等价性**，利用8对点来估计$\boldsymbol{E}$，这就是经典的**八点法**，其只用了$\boldsymbol{E}$的线性性质（原式展开后有9个方程，在尺度等价性下剩下8个方程，刚好构成线性方程组），在线性代数框架下求解
+考虑一对匹配点，它们的归一化坐标为$\boldsymbol{x}_1 = [u_1, v_1, 1]^T,\boldsymbol{x}_2 = [u_2, v_2, 1]^T$，把$\boldsymbol{E}$展开写成向量形式：
+$$\boldsymbol{e} = [e_1, e_2, e_3, e_4, e_5, e_6, e_7, e_8, e_9]^T$$
+那么対极约束可以写成：
+$$[u_2u_1, u_2v_1, u_2, v_2u_1, v_2v_1, v_2, u_1, v_1, 1] \cdot \boldsymbol{e} = 0$$
+对于其他7对点，也有类似的方程，于是可以得到一个线性方程组：
+$$\begin{bmatrix}
+  u^1_2u^1_1 & u^1_2v^1_1 & u^1_2 & v^1_2u^1_1 & v^1_2v^1_1 & v^1_2 & u^1_1 & v^1_1 & 1 \\
+  u^2_2u^2_1 & u^2_2v^2_1 & u^2_2 & v^2_2u^2_1 & v^2_2v^2_1 & v^2_2 & u^2_1 & v^2_1 & 1 \\
+  \vdots & \vdots & \vdots & \vdots & \vdots & \vdots & \vdots & \vdots & \vdots \\
+  u^8_2u^8_1 & u^8_2v^8_1 & u^8_2 & v^8_2u^8_1 & v^8_2v^8_1 & v^8_2 & u^8_1 & v^8_1 & 1
+\end{bmatrix}\begin{bmatrix}
+  e_1 \\
+  e_2 \\
+  e_3 \\
+  e_4 \\
+  e_5 \\
+  e_6 \\
+  e_7 \\
+  e_8 \\
+  e_9
+\end{bmatrix} = 0$$
+$\boldsymbol{e}$位于左侧矩阵的零空间中，如果这个矩阵满秩（$=8$），那么零空间维数为$9 - 8 = 1$，也就是$\boldsymbol{e}$构成一条线，刚好就是其尺度等价性
+在解得初步本质矩阵后，如果要恢复相机运动的$\boldsymbol{R,t}$，则需要使用**奇异值分解**$(\text{SVD})$：
+$$\boldsymbol{E} = \boldsymbol{U\Sigma V}^T$$
+注意到$\boldsymbol{t}^\land$（反对称矩阵性质及$\boldsymbol{t}$是单位向量，这里将其进行了归一化长度为$1$）可以写成：
+$$\boldsymbol{t}^\land = \boldsymbol{UZU}^T$$
+$\boldsymbol{E}$和$\boldsymbol{t}^\land$拥有相同的svd左分解矩阵原因是：
+$$\boldsymbol{EE}^T = \boldsymbol{t}^\land\boldsymbol{R}(\boldsymbol{t}^\land\boldsymbol{R})^T = \boldsymbol{t}^\land\boldsymbol{R}\boldsymbol{R}^T(\boldsymbol{t}^\land)^T = \boldsymbol{t}^\land(\boldsymbol{t}^\land)^T$$
+那么它们的特征向量矩阵即$\boldsymbol{U}$就是相同的，同时也能得到$C(\boldsymbol{E}) = C(\boldsymbol{t}^\land)$
+我们定义$\boldsymbol{R}_Z ( \cfrac{\pi}{2} )$表示绕$Z$轴旋转$90^\circ$的旋转矩阵$\begin{bmatrix}
+  0 & -1 & 0 \\
+  1 & 0 & 0 \\
+  0 & 0 & 1
+\end{bmatrix}$
+如果$\boldsymbol{E}$的奇异值分解正确，那么$\boldsymbol{\Sigma} = \text{diag}(1, 1, 0)$，从而$\boldsymbol{Z} = \boldsymbol{R}_Z(\cfrac{\pi}{2})\boldsymbol{\Sigma}$，于是我们的$\boldsymbol{R}$必须为$\boldsymbol{UR}^T_Z(\cfrac{\pi}{2})\boldsymbol{V}^T$
+由于$\boldsymbol{E}$正负号等价，所以最后分解的结果一共存在4个可能的解，但只有一个是正确的，我们只要对$\boldsymbol{t}^\land,\boldsymbol{R}$进行三角化求它们在相机下的深度，只要两个深度都为正，那就是正确的解
+还有一个问题就是，通过线性方程组求解的$\boldsymbol{E}$的奇异值可能不一定为$\sigma, \sigma, 0$形式（上述推导是在假设奇异值为刚刚所述形式时），我们有两种方法，其中之一就是直接设$\Sigma = \text{diag}(1, 1, 0)$，这是最直接快捷的做法，如果要保证能量稳定，可以其投影到流形上，即：
+- $\Sigma = \text{diag}(\sigma_1, \sigma_2, \sigma_3)$，假设$\sigma_1 \geq, \sigma_2 \geq, \sigma_3$
+- 记$\sigma = \cfrac{\sigma_1 + \sigma_2}{2}$
+- 直接设置新矩阵$\boldsymbol{E}' = \boldsymbol{U}\text{diag}(\sigma, \sigma, 0)\boldsymbol{V}^T$作为接下来分解的本质矩阵
+
+因为$\boldsymbol{E}$具有尺度等价性，这样做是合理的
+
+##### 单应矩阵
+有时候会出现需要解算的空间点$P$全部位于一个物理平面上（例如在扫描墙体时），此时基于**平面投影几何**就能解算$P$，其中需要用到和本质矩阵用途一样的**单应矩阵**$\boldsymbol{H}$
+设相机距离$P$所在平面距离$d$，该平面法向量$\boldsymbol{n}$，则有：
+$$\boldsymbol{n}^T\boldsymbol{P} + d = 0$$
+整理得$-\cfrac{\boldsymbol{n}^T\boldsymbol{P}}{d} = 1$
+前文讲述了一个尺度相等线性映射：
+$$\boldsymbol{p}_2 \simeq \boldsymbol{K}(\boldsymbol{RP} + \boldsymbol{t})$$
+展开化简得：
+$$\boldsymbol{p}_2 \simeq \boldsymbol{K}(\boldsymbol{R} - \cfrac{\boldsymbol{tn}^T}{d})\boldsymbol{K}^{-1}\boldsymbol{p}_1$$
+如果记右边$\boldsymbol{p}_1$左乘的一串为矩阵$\boldsymbol{H}$，其就称为单应矩阵$\begin{bmatrix}
+  h_1 & h_2 & h_3 \\
+  h_4 & h_5 & h_6 \\
+  h_7 & h_8 & h_9
+\end{bmatrix}$，显然其也有尺度不变性，注意这里的单应矩阵是在像素坐标系下的单应矩阵，如果要的是归一化坐标系下的单应矩阵，则应把左右的相机内参矩阵$\boldsymbol{K}$去除
+我们用尺度因子展开上式得到：
+$$u_2 = \cfrac{h_1u_1 + h_2v_1 + h_3}{h_7u_1 + h_8v_1 + h_9} \\
+v_2 = \cfrac{h_4u_1 + h_5v_1 + h_6}{h_7u_1 + h_8v_1 + h_9}$$
+在处理中可以设$h_9 = 1$，整理得：
+$$u_2 = h_1u_1 + h_2v_1 + h_3 - h_7u_1u_2 - h_8v_1u_2 \\ 
+v_2 = h_4u_1 + h_5v_1 + h_6 - h_7u_1u_2 - h_8v_1v_2$$
+这样一组匹配点可以构造除了线性相关外两个约束，只需要四对匹配点就能算出自由度为8的单应矩阵（这些特征点不能有三点共线的情况），记$\boldsymbol{h} = [h_1, h_2, \cdots, h_9]^T$，可以列出线性方程组，随后求解这个方程组即可，这称为**直接线性变换法**$(\text{DLt})$
+和本质矩阵一样，求解出单应矩阵后，对其解算$\boldsymbol{R,t}$即可，最后的筛选正确解流程也是一样的
+
+##### 初始化的纯旋转问题
+观察上述的求解过程，会发现如果$\boldsymbol{t}$为0，即相机没有平移而是纯旋转，会导致无法求解$\boldsymbol{R}$，因为得到的本质矩阵为0，虽然可以用单应矩阵求解，但是无法用三角测量估计特征点的空间位置，所以单目初始化**必须**要有一定程度的平移
+
+##### 无解（点对过多）情况
+如果给的点数多于8对，可以使用最小二乘的思想，设求解本质矩阵时的线性方程组左侧的系数矩阵为$\boldsymbol{A}$，即方程$\boldsymbol{Ae} = 0$无解，即无法将$\boldsymbol{e}$通过$\boldsymbol{A}$直接变换为0，所以我们改变$\boldsymbol{e}$使得：
+$$||\boldsymbol{Ae}||^2_2$$
+最小，即为最小化$\boldsymbol{e}^T\boldsymbol{A}^T\boldsymbol{Ae}$这个二次型，让$\boldsymbol{\hat{e}}$变化后尽可能接近0
+不过，多出来的点对可能出现误匹配的情况，这样最小二乘法会放大这个误差，此时我们使用另一个方法**随机采样一致性**$(\text{Random Sample Concensus, RANSAC})$，和它结合后，整个最小二乘+RANSAC的执行步骤如下：
+- 1. 随机采样8个点
+- 2. 用这8个点通过本质矩阵求解模型参数
+- 3. 计算所有点到该模型的距离（对极线距离），距离小于阈值$\delta$的记为**内点**（支持模型的点）
+- 4. 如果内点数量超过了之前的记录，则更新最优模型
+- 5. 回到第一步继续迭代，直到内点数量达到要求或者迭代次数达到上限
+- 6. 排除所有非内点，剩下的所有内点进行最小二乘法求出更为精确的$\boldsymbol{E}$
+
+#### 三角测量（三角化）
+一般来说，我们使用三角测量进行最后的深度测定，来筛选剩下的4个解中错误的解。在此之前，我们先要确定直线$O_1p_1$与$O_2p_2$的交点，理论上，它们是有交点的，但是在存在噪声的情况下，这就有极大的可能不会存在交点，此时我们只需要用最小二乘法即可解得近似解，我们有：
+$$s_2\boldsymbol{x}_2 = s_1\boldsymbol{Rx}_1 + \boldsymbol{t}$$
+其中$s_1,s_2$是两个特征点的深度，我们已知$\boldsymbol{R,t}$，要求深度，先介绍除最小二乘法以外的方法。我们同时左乘$\boldsymbol{x}^\land_2$，这样左侧就变为0，通过求解右侧即可求得$s_1$，这样再带回原式就能求解$s_2$了，这个方法简洁快速，但是存在$\boldsymbol{R,t}$影响左侧式子不一定为0的情况，如果使用最小二乘法：
+- 1. 将左乘前的方程整理成：
+  $$[\boldsymbol{Rx}_1 ~ -x_2]\begin{bmatrix}
+    s_1 \\
+    s_2
+  \end{bmatrix} = -\boldsymbol{t}$$
+  记为$A\boldsymbol{s} = \boldsymbol{b}$
+- 3. 同时左乘$A^T$，求解$\boldsymbol{s} = (A^T A)^{-1} A^T (-\boldsymbol{b})$
+- 4. 解得两个点：
+  $$\begin{cases}
+    \boldsymbol{P}_1 = \hat{s}_1\boldsymbol{x}_1 \\
+    \boldsymbol{P}_2 = \boldsymbol{R}^T(\hat{s}_2\boldsymbol{x}_2 - \boldsymbol{t})
+  \end{cases}$$
+- 5. 构造最小化代价函数$J(s_1, s_2) = ||\boldsymbol{P}_1 - \boldsymbol{P}_2||^2 = \| s_1 \boldsymbol{x}_1 - (s_2 \boldsymbol{R}^T \boldsymbol{x}_2 - \boldsymbol{R}^T \boldsymbol{t}) \|^2$
+- 6. 令$\boldsymbol{f}_1 = \boldsymbol{x}_1,\boldsymbol{f}_2 = \boldsymbol{R}^T\boldsymbol{x}_2$，再令$J(s_1, s_2) = 0$并记得到的方程为：
+  $$A\boldsymbol{s} = \boldsymbol{b}$$
+  其中$A = \begin{bmatrix} \boldsymbol{f}_1 & -\boldsymbol{f}_2 \end{bmatrix}_{3 \times 2}, \quad \boldsymbol{s} = \begin{bmatrix} s_1 \\ s_2 \end{bmatrix}_{2 \times 1}, \quad \boldsymbol{b} = - \boldsymbol{R}^T \boldsymbol{t}_{3 \times 1}$
+- 7. 左乘$A^T$求得$\begin{bmatrix}
+  s_1 \\
+  s_2
+\end{bmatrix}$
+- 8. 最后带入回$\boldsymbol{P}_1,\boldsymbol{P}_2$，我们最终可以令$\boldsymbol{P} = \boldsymbol{P}_1$也可以令其为$\boldsymbol{P} = \cfrac{\boldsymbol{P}_1 + \boldsymbol{P}_2}{2}$
+
+值得注意的是，三角测量有它的不确定性，即平移过小，会导致深度的变化值较大，导致不确定性较高，而如果平移过大，则会导致场景改变，即可能会出现新的场景特征。为了解决这个问题，我们其实可以不断观测这个特征点（如果他它服从高斯分布），在信息正确的情况下，它的方差会不断减小乃至收敛，这样就得到了一个滤波器，称为**深度滤波器**$\text{DF}$
+
+#### $\text{PnP}$
