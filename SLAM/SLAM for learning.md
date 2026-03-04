@@ -698,3 +698,161 @@ $$s_2\boldsymbol{x}_2 = s_1\boldsymbol{Rx}_1 + \boldsymbol{t}$$
 值得注意的是，三角测量有它的不确定性，即平移过小，会导致深度的变化值较大，导致不确定性较高，而如果平移过大，则会导致场景改变，即可能会出现新的场景特征。为了解决这个问题，我们其实可以不断观测这个特征点（如果他它服从高斯分布），在信息正确的情况下，它的方差会不断减小乃至收敛，这样就得到了一个滤波器，称为**深度滤波器**$\text{DF}$
 
 #### $\text{PnP}$
+##### 直接线性变换
+考虑空间点$P$，它的齐次坐标为$\boldsymbol{P} = [X, Y, Z, 1]^T$，在图像$I_1$中，投影到特征点$\boldsymbol{x}_1 = [u_1, v_1, 1]^T$，我们需要求解相机的位姿$\boldsymbol{R,t}$，定义增广矩阵$[\boldsymbol{R}|\boldsymbol{t}]$为一个$3\times 4$矩阵$\boldsymbol{T}$，展开后有：
+$$s\begin{bmatrix}
+  u_1 \\
+  v_1 \\
+  1
+\end{bmatrix} = \begin{bmatrix}
+  t_1 & t_2 & t_3 & t_4 \\
+  t_5 & t_6 & t_7 & t_8 \\
+  t_9 & t_10 & t_11 & t_12
+\end{bmatrix}\begin{bmatrix}
+  X \\
+  Y \\
+  Z \\
+  1
+\end{bmatrix}$$
+把尺度因子$s$消去可以得到两个约束：
+$$\begin{cases}
+  u_1 = \cfrac{t_1X + t_2Y + t_3Z + t_4}{t_9X + t_{10}Y + t_{11}Z + t_{12}} \\
+  v_1 = \cfrac{t_5X + t_6Y + t_7Z + t_8}{t_9X + t_{10}Y + t_{11}Z + t_{12}}
+\end{cases}$$
+另定义$\boldsymbol{T}$的行向量：
+$$\boldsymbol{t}_1 = [t_1, t_2, t_3, t_4] ^ T,\boldsymbol{t}_2 = [t_5, t_6, t_7, t_8]^T, \boldsymbol{t}_3 = [t_9, t_{10}, t_{11}, t_{12}]^T$$
+结合上面的式子，可以化简为：
+$$\begin{bmatrix}
+  \boldsymbol{t}^T_1\boldsymbol{P} - \boldsymbol{t}^T_3\boldsymbol{P}u_1 = 0 \\
+  \boldsymbol{t}^T_2\boldsymbol{P} - \boldsymbol{t}^T_3\boldsymbol{P}v_1 = 0
+\end{bmatrix}$$
+我们要求$\boldsymbol{t}$，每个特征点提供了关于其的两个线性约束，如果有$N$个特征点，可以列出如下线性方程组：
+$$\begin{bmatrix}
+  \boldsymbol{P}^T_1 & 0 & -u_1\boldsymbol{P}^T_1 \\
+  0 & \boldsymbol{P}^T_1 & -v_1\boldsymbol{P}^T_1 \\
+  \vdots & \vdots & \vdots \\
+  \boldsymbol{P}^T_N & 0 & -u_N\boldsymbol{P}^T_N \\
+  0 & \boldsymbol{P}^T_N & -v_N\boldsymbol{P}^T_N
+\end{bmatrix}\begin{bmatrix}
+  \boldsymbol{t}_1 \\
+  \boldsymbol{t}_2 \\
+  \boldsymbol{t}_3
+\end{bmatrix} = 0$$
+求解12维矩阵需要6对匹配点，这种方法称为DLT，当匹配点大于6对，需要使用SVD等方法对超定方程求最小二乘解
+然而求得的$\boldsymbol{T}$的左侧$3\times 3$部分不一定是$\mathrm{SO}(3)$中的元素，由于噪声的存在，解出来的$\boldsymbol{R}$不一定满足$\boldsymbol{RR}^T = 1$（平移向量属于向量空间，好处理），我们可以使用$\text{QR}$分解来完成近似或者使用：
+$$\boldsymbol{R}\leftarrow (\boldsymbol{RR}^T)^{-\frac{1}{2}}\boldsymbol{R}$$
+来计算，其为**极分解**的解析式（这个$-\cfrac{1}{2}$次幂可以用SVD方式也可以用特征值分解方式计算），极分解表示任意非奇异矩阵$A$都能分解为$A=PQ$即拉伸矩阵左乘旋转矩阵的形式，其中$P = (AA^T)^{-\frac{1}{2}}$，所以纯旋转矩阵就能通过不准确的$\boldsymbol{R}$计算得到$\boldsymbol{R}' = (\boldsymbol{RR}^T)^{-\frac{1}{2}}R$
+而qr分解的步骤如下：
+- 1. 对求出来的不准确矩阵$A$进行svd分解得到
+  $$A = U\Sigma V^T$$
+- 2. 令$\boldsymbol{R} = UV^T$或者$\boldsymbol{R} = U\text{diag}(1, 1, \det(UV^T))V^T$，这里强行把奇异值矩阵变为单位矩阵，这样就满足$\det(\boldsymbol{R}) = 1$与$\boldsymbol{RR}^T = 1$
+
+它的最小二乘意义是在 $\text{Frobenius}$ 范数下，找到的是距离原始矩阵 $A$ 最近的一个旋转矩阵 $R$，即求解：
+$$\min_{\boldsymbol{R}} \|\boldsymbol{R} - A\|_F \quad \text{subject to } \boldsymbol{R} \in SO(3)$$
+
+##### $\text{P3P}$
+对于$\text{P3P}$，即知道三对$\text{3D-2D}$点对，这样只需要利用三角形相似性质以及几何学定理即可求解相机的位姿
+不过它也有缺点，如果点对多于三组，就无法利用多余信息，因为它不在线性代数框架下求解，几何学框架下无法求近似解，同时如果点受到噪声影响，就会存在误匹配，导致算法失效
+
+##### 最小化重投影误差
+我们可以把PnP问题构建成一个关于冲投影误差的非线性最小二乘问题，把它们全都堪称优化变量，放在一起优化。这类**把相机和三维点放一起进行最小化**的问题，统称为$\text{Bundle Adjustment}$
+考虑$n$个三维空间点$P$及投影$p$，设我们要计算的相机的位姿$\boldsymbol{R,t}$的李群表示为$\boldsymbol{T}$，对于第$i$个空间点坐标$\boldsymbol{P}_i = [X_i, Y_i, Z_i]^T$的投影像素坐标为$\boldsymbol{u}_i = [u_i, v_i]^T$，设$\boldsymbol{K}$为相机内参矩阵，有：
+$$s_i\boldsymbol{u}_i = \boldsymbol{KTP}_i$$
+这个式子有隐含从齐次到非齐次坐标的转换，否则在矩阵乘法上维度不对，我们利用相机位姿未知及观测点的噪声产生的误差进行求和，构建一个最小二乘问题使式子最小化：
+$$\boldsymbol{T}^* = \text{arg}\min_{\boldsymbol{T}}\cfrac{1}{2}\sum\limits_{i = 1}^n \| \boldsymbol{u}_i - \cfrac{1}{s_i}\boldsymbol{KTP} \|^2_2$$
+其中的误差项，是将3D点的投影位置和观测位置作差，称为**重投影误差**，如图：
+![alt text](Image//image-4.png)
+随后我们需要使用李代数（转为指数形式）构建无约束优化问题，通过高斯牛顿法等优化算法进行求解，不过在此之前还需要知道每个误差项关于优化变量的导数，即**线性化**：
+$$\boldsymbol{e}(\boldsymbol{x} + \Delta \boldsymbol{x}) \approx \boldsymbol{e}(\boldsymbol{x}) + \boldsymbol{J}^T\Delta \boldsymbol{x}$$
+对于$\boldsymbol{J}^T$，我们来求解它，记$\boldsymbol{P}' = (\boldsymbol{TP}_{1:3}) = [X', Y', Z']^T$即变换到相机坐标系下的空间点坐标为$\boldsymbol{P'}$取其前三维，那么有：
+$$\boldsymbol{su} = \boldsymbol{KP}'$$
+展开得：
+$$\begin{bmatrix}
+  su \\
+  sv \\
+  s
+\end{bmatrix} = \begin{bmatrix}
+  f_x & 0 & c_x \\
+  0 & f_y & c_y \\
+  0 & 0 & 1
+\end{bmatrix}\begin{bmatrix}
+  X' \\
+  Y' \\
+  Z'
+\end{bmatrix}$$
+消去$s$得到：
+$$\begin{cases}
+  u = f_x\cfrac{X'}{Z'} + c_x \\
+  v = f_y\cfrac{Y'}{Z'} + c_y
+\end{cases}$$
+我们对$\boldsymbol{T}$左乘扰动量$\delta \boldsymbol{\xi}$，考虑$\boldsymbol{e}$的变化关于扰动量的导数：
+$$\cfrac{\partial \boldsymbol{e}}{\partial \delta\boldsymbol{\xi}} = \lim_{\delta\boldsymbol{\xi}\rightarrow 0} \cfrac{\boldsymbol{e}(\delta\boldsymbol{\xi}\oplus \boldsymbol{\xi}) - \boldsymbol{e}(\boldsymbol{\xi})}{\delta\boldsymbol{\xi}} = \cfrac{\partial \boldsymbol{e}}{\partial \boldsymbol{P}'} \cfrac{\partial \boldsymbol{P}'}{\partial \delta \boldsymbol{\xi}}$$
+其中$\oplus$表示李代数上的左乘扰动，第一项为：
+$$\cfrac{\partial \boldsymbol{e}}{\partial \boldsymbol{P}'} = -\begin{bmatrix}
+  \cfrac{\partial u}{\partial X'} & \cfrac{\partial u}{\partial Y'} & \cfrac{\partial u}{\partial Z'} \\
+  \cfrac{\partial v}{\partial X'} & \cfrac{\partial v}{\partial Y'} & \cfrac{\partial v}{\partial Z'}
+\end{bmatrix} = -\begin{bmatrix}
+  \cfrac{f_x}{Z'} & 0 & -\cfrac{f_x X'}{Z'^2} \\
+  0 & \cfrac{f_y}{Z'} & -\cfrac{f_y Y'}{Z'^2}
+\end{bmatrix}$$
+第二项即为李代数的导数：
+$$\cfrac{\partial (\boldsymbol{TP})}{\partial \delta \boldsymbol{\xi}} = (\boldsymbol{TP})^{\odot} = \begin{bmatrix}
+  \boldsymbol{I} & -\boldsymbol{P}'^\land \\
+  \boldsymbol{0}^T & \boldsymbol{0}^T
+\end{bmatrix}$$
+于是$\cfrac{\partial\boldsymbol{P'}}{\partial\delta\boldsymbol{\xi}} = [\boldsymbol{I}, -\boldsymbol{P}'^\land]$
+将两项相乘我们能得到$2\times 6$的雅可比矩阵$\boldsymbol{J^T}$
+![alt text](Image//image-5.png)
+接下来我们讨论$\boldsymbol{e}$关于$\boldsymbol{P}$的导数，用以优化特征点的空间位置（BA是需要的，如果仅运动估计，则只需要位姿就行了，如果仅结构估计，那就只有这个）：
+$$\cfrac{\partial\boldsymbol{e}}{\partial\boldsymbol{P}} = \cfrac{\partial\boldsymbol{e}}{\partial\boldsymbol{P}'}\cfrac{\partial\boldsymbol{P}'}{\partial\boldsymbol{P}}$$
+第一项已推导，第二项按照定义有$\boldsymbol{P}' = (\boldsymbol{TP})_{1:3} = \boldsymbol{RP} + \boldsymbol{t}$，于是：
+$$\cfrac{\partial \boldsymbol{e}}{\partial \boldsymbol{P}} = -\begin{bmatrix}
+  \cfrac{f_x}{Z'} & 0 & -\cfrac{f_xX'}{Z'^2} //
+  0 & \cfrac{f_y}{Z'} & -\cfrac{f_yY'}{Z'^2}
+\end{bmatrix}\boldsymbol{R}$$
+
+#### 使用$\text{g2o}$进行$\text{BA}$优化
+![alt text](Image//image-6.png)
+如图为一个PnP的BA的图优化表示，这里的$\boldsymbol{T}$表示相机位置，$\boldsymbol{P}_j$表示空间点，这两个点为顶点，$\boldsymbol{z}_j$是相机截取到的画面，是不变的观测值，$h(\boldsymbol{T,P}_j)$是通过这两个顶点计算出来的$\boldsymbol{P}_j$投影到相机平面上的位置，$\text{EdgeProjection}$是重投影误差，即$\text{Error} = \boldsymbol{z}_j - h(\boldsymbol{T, P}_j)$，用边约束两个顶点表示需要优化这两个点降低重投影误差
+
+#### $\text{3D-3D: ICP}$
+假设我们用$\text{RGB-D}$对两幅图像配对得到了一组配对好了3D点：
+$$\boldsymbol{P} = \{\boldsymbol{p_1}, \cdots, \boldsymbol{p_n}\}, \boldsymbol{P}' = \{\boldsymbol{p'_1}, \cdots, \boldsymbol{p'_n}\}$$
+我们需要找到一个欧式变换$\boldsymbol{R, t}$使得：
+$$\forall i, \boldsymbol{p_i} = \boldsymbol{Rp}'_i + \boldsymbol{t}$$
+这个问题可以使用**迭代最近点**$(\text{Iterative Closest Point, ICP})$求解，这种问题无需考虑相机，同时由于激光数据特征不够丰富，我们无法知道两个点集之间的匹配关系，只能认为距离最近的两个点为同一个，和pnp类似，icp也分线代求解和非线性优化方式求解
+
+##### $\text{SVD}$方法
+定义第$i$对点误差项：
+$$\boldsymbol{e}_i = \boldsymbol{p}_i - (\boldsymbol{Rp}'_i + \boldsymbol{t})$$
+构建最小二乘问题，求使误差平房和达到极小的$\boldsymbol{R, t}$：
+$$\min_{\boldsymbol{R, t}}\cfrac{1}{2} \sum\limits_{i = 1}^n \| \boldsymbol{p}_i - (\boldsymbol{Rp}'_i + \boldsymbol{t}) \|^2_2$$
+定义两组点的质心为它们分量的求和均值$\boldsymbol{p, p}'$，我们可以对最小二乘问题的优化目标函数化简得到：
+$$\min_{\boldsymbol{R, t}}J = \cfrac{1}{2}\sum\limits_{i = 1}^n \| \boldsymbol{p}_i - \boldsymbol{p} - \boldsymbol{R}(\boldsymbol{p}'_i - \boldsymbol{p}') \|^2 + \| \boldsymbol{p} - \boldsymbol{Rp}' - \boldsymbol{t} \|^2$$
+观察等式，我们只要求得$\boldsymbol{R}$，第二项令为0就能得到$\boldsymbol{t}$，所以ICP分为三个步骤求解：
+- 1. 计算两组点的质心位置$\boldsymbol{p, p}'$，然后计算每个点的**去质心坐标**：
+  $$\boldsymbol{q}_i = \boldsymbol{p}_i - \boldsymbol{p}, \boldsymbol{q}'_i = \boldsymbol{p}'_i - \boldsymbol{p}'$$
+- 2. 计算旋转矩阵：
+  $$\boldsymbol{R}^* = \text{arg }\min_{\boldsymbol{R}}\cfrac{1}{2}\sum\limits_{i = 1}^n \| \boldsymbol{q}_i - \boldsymbol{Rq}'_i \|^2$$
+- 3. 计算$\boldsymbol{t}^* = \boldsymbol{p} - \boldsymbol{R}^*\boldsymbol{p}'$
+
+我们主要求解$\boldsymbol{R}$，对于目标函数我们展开得到：
+$$\cfrac{1}{2}\sum\limits_{i = 1}^n\| \boldsymbol{q}_i - \boldsymbol{Rq}'_i \|^2 = \cfrac{1}{2}\sum\limits_{i = 1}^n(\boldsymbol{q^Tq_i} + \boldsymbol{q'^T_iR^TRq'_i} - 2\boldsymbol{q^T_iRq'_i})$$
+注意到至于第三项与$\boldsymbol{R}$有关，于是优化目标函数变为：
+$$\sum\limits_{i = 1}^n -\boldsymbol{q^T_iRq'_i} = -\text{tr}(\boldsymbol{R}\sum\limits_{i = 1}^n\boldsymbol{q'_iq^T_i})$$
+用SVD方法能求解这个问题，但是证明很复杂，它的求解步骤如下：
+- 1. 令$\boldsymbol{W} = \sum\limits_{i = 1}^n \boldsymbol{q_iq'^T_i}$
+- 2. 对$\boldsymbol{W}$进行SVD分解得到$\boldsymbol{W} = \boldsymbol{U\Sigma V}^T$
+- 3. 如果$\boldsymbol{W}$满秩，则$\boldsymbol{R} = \boldsymbol{UV}^T$，如果$\det(\boldsymbol{R})<0$，则取其相反数
+
+之后解$\boldsymbol{t}$即可
+
+##### 非线性优化方法
+虽然这个最小二乘问题有解细节，没有必要迭代优化，但是实际情况可能会出现深度无法测量的数据点，此时我们可以混合使用PnP和ICP优化，深度已知则建模3D-3D误差，未知则建模3D-2D误差，将所有误差放到同一个问题中考虑，使得求解更加方便。
+以李代数表达位姿时，目标函数可以写成：
+$$\min_{\boldsymbol{\xi}} = \cfrac{1}{2}\sum\limits_{i = 1}^n \| \boldsymbol{p_i} - e^{\boldsymbol{\xi}^\land}\boldsymbol{p}'_i \|^2_2$$
+我们前面推导了单个误差项关于位姿的导数，直接使用李代数扰动模型：
+$$\cfrac{\partial \boldsymbol{e}}{\partial \delta \boldsymbol{\xi}} = -(e^{\boldsymbol{\xi}^\land}\boldsymbol{p}'_i)^\odot$$
+可以证明，icp问题不会无解，在存在唯一解的情况下，只要找到极小值解，这个极小值就是全局最优值，因此不会遇到局部极小值和非全局最小的情况，也就是它可以任意选定初始值
+
+### 直接法
