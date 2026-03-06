@@ -697,7 +697,7 @@ $$s_2\boldsymbol{x}_2 = s_1\boldsymbol{Rx}_1 + \boldsymbol{t}$$
 
 值得注意的是，三角测量有它的不确定性，即平移过小，会导致深度的变化值较大，导致不确定性较高，而如果平移过大，则会导致场景改变，即可能会出现新的场景特征。为了解决这个问题，我们其实可以不断观测这个特征点（如果他它服从高斯分布），在信息正确的情况下，它的方差会不断减小乃至收敛，这样就得到了一个滤波器，称为**深度滤波器**$\text{DF}$
 
-#### $\text{PnP}$
+#### $\text{3D-2D: PnP}$
 ##### 直接线性变换
 考虑空间点$P$，它的齐次坐标为$\boldsymbol{P} = [X, Y, Z, 1]^T$，在图像$I_1$中，投影到特征点$\boldsymbol{x}_1 = [u_1, v_1, 1]^T$，我们需要求解相机的位姿$\boldsymbol{R,t}$，定义增广矩阵$[\boldsymbol{R}|\boldsymbol{t}]$为一个$3\times 4$矩阵$\boldsymbol{T}$，展开后有：
 $$s\begin{bmatrix}
@@ -816,7 +816,7 @@ $$\cfrac{\partial \boldsymbol{e}}{\partial \boldsymbol{P}} = -\begin{bmatrix}
 如图为一个PnP的BA的图优化表示，这里的$\boldsymbol{T}$表示相机位置，$\boldsymbol{P}_j$表示空间点，这两个点为顶点，$\boldsymbol{z}_j$是相机截取到的画面，是不变的观测值，$h(\boldsymbol{T,P}_j)$是通过这两个顶点计算出来的$\boldsymbol{P}_j$投影到相机平面上的位置，$\text{EdgeProjection}$是重投影误差，即$\text{Error} = \boldsymbol{z}_j - h(\boldsymbol{T, P}_j)$，用边约束两个顶点表示需要优化这两个点降低重投影误差
 
 #### $\text{3D-3D: ICP}$
-假设我们用$\text{RGB-D}$对两幅图像配对得到了一组配对好了3D点：
+假设我们用$\text{RGB-D}$对两幅图像配对得到了一组配对好了的3D点（获取图像后使用orb等方法进行特征点提取与匹配）：
 $$\boldsymbol{P} = \{\boldsymbol{p_1}, \cdots, \boldsymbol{p_n}\}, \boldsymbol{P}' = \{\boldsymbol{p'_1}, \cdots, \boldsymbol{p'_n}\}$$
 我们需要找到一个欧式变换$\boldsymbol{R, t}$使得：
 $$\forall i, \boldsymbol{p_i} = \boldsymbol{Rp}'_i + \boldsymbol{t}$$
@@ -856,3 +856,12 @@ $$\cfrac{\partial \boldsymbol{e}}{\partial \delta \boldsymbol{\xi}} = -(e^{\bold
 可以证明，icp问题不会无解，在存在唯一解的情况下，只要找到极小值解，这个极小值就是全局最优值，因此不会遇到局部极小值和非全局最小的情况，也就是它可以任意选定初始值
 
 ### 直接法
+特征点法存在缺点：
+- 计算耗时，需要高性价比的设备，但是效果也并不是很好
+- 只使用特征点可能丢弃大部分可能有用的图像信息
+- 若在特征缺失的地方，没有明显的纹理信息，特征点数量显著下降，难以找到足够的匹配点来计算相机运动
+
+对于这几种情况，我们可以保留特征点，只计算关键点，使用**光流法**跟踪特征点运动；也可以只计算关键点，不计算描述子，使用**直接法**计算特征点下一时刻的位置，跳过了描述子和光流的计算过程和时间
+在直接法中，我们不需要知道点与点之间的对应关系，通过最小化**光度误差**就能求得它们
+
+#### $\text{2D}$光流
