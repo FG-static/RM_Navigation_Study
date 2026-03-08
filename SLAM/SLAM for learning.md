@@ -855,7 +855,7 @@ $$\min_{\boldsymbol{\xi}} = \cfrac{1}{2}\sum\limits_{i = 1}^n \| \boldsymbol{p_i
 $$\cfrac{\partial \boldsymbol{e}}{\partial \delta \boldsymbol{\xi}} = -(e^{\boldsymbol{\xi}^\land}\boldsymbol{p}'_i)^\odot$$
 可以证明，icp问题不会无解，在存在唯一解的情况下，只要找到极小值解，这个极小值就是全局最优值，因此不会遇到局部极小值和非全局最小的情况，也就是它可以任意选定初始值
 
-### 直接法
+### 光流法
 特征点法存在缺点：
 - 计算耗时，需要高性价比的设备，但是效果也并不是很好
 - 只使用特征点可能丢弃大部分可能有用的图像信息
@@ -865,3 +865,83 @@ $$\cfrac{\partial \boldsymbol{e}}{\partial \delta \boldsymbol{\xi}} = -(e^{\bold
 在直接法中，我们不需要知道点与点之间的对应关系，通过最小化**光度误差**就能求得它们
 
 #### $\text{2D}$光流
+直接法从光流演变而来，光流是描述像素随实践在图像之间运动的方法，我们希望追踪它们的运动过程，其中计算部分像素的运动称为**稀疏光流**，计算所有像素的称为**稠密光流**，其中稀疏光流以$\text{Lucas-Kanade}$**光流**为代表，稠密光流以$\text{Horn-Schunck}$**光流**为代表
+
+##### $\text{LK}$光流
+在lk光流中，认为图像随实践变化，图像可看作时间的函数$\boldsymbol{I}(t)$，在$t$时刻位于$(x,y)$处的函数，其灰度可写为$\boldsymbol{I}(x, y, t)$，其值域就是图像中像素的灰度
+lk光流的基本假设是**灰度不变假设**，即同一个空间点的像素灰度值，在各个图像中固定不变。对于$t$时刻的$(x,y)$处像素，假设其$t+dt$时刻移动到了$(x+dx, y+dy)$处，那么有：
+$$\boldsymbol{I}(x+dx, y+dy, t+dt) = \boldsymbol{I}(x, y, t)$$
+对左边进行一阶泰勒展开：
+$$\boldsymbol{I}(x + dx, y + dy, t + dt) \approx \boldsymbol{I}(x, y, t) + \sum\limits_{\text{cyc}} \cfrac{\partial \boldsymbol{I}}{\partial x}dx$$
+由于灰度不变，所以可得：
+$$\cfrac{\partial \boldsymbol{I}}{\partial x} \cfrac{dx}{dt} + \cfrac{\partial \boldsymbol{I}}{\partial y} \cfrac{dy}{dt} = -\cfrac{\partial \boldsymbol{I}}{\partial t}$$
+如果记$\cfrac{dx}{dt}$为速度$u$，另一个为$v$，同时我们用梯度表示两项偏导，可以写成矩阵的形式：
+$$[\boldsymbol{I}_x ~ \boldsymbol{I}_y] \begin{bmatrix}
+  u \\
+  v
+\end{bmatrix} = -\boldsymbol{I}_t$$
+这个式子有两个变量，显然无法直接求解，我们引入新的假设：**某一个窗口内的像素具有相同的运动**，具体来说，考虑一个大小为$w\times w$的窗口，它含有$w^2$个像素，且窗口内所有像素具有同样的运动，我们得到$w^2$个方程：
+$$[\boldsymbol{I}_x ~ \boldsymbol{I}_y]_k \begin{bmatrix}
+  u \\
+  v
+\end{bmatrix} = -\boldsymbol{I}_{tk}, k = 1,\cdots, w^2$$
+如果记
+$$\boldsymbol{A} = \begin{bmatrix}
+  [\boldsymbol{I}_x, \boldsymbol{I}_y]_1 \\
+  \vdots \\
+  [\boldsymbol{I}_x, \boldsymbol{I}_y]_k
+\end{bmatrix},\boldsymbol{b} = \begin{bmatrix}
+  \boldsymbol{I}_{t1} \\
+  \vdots \\
+  \boldsymbol{I}_{tk}
+\end{bmatrix}$$
+于是整个方程为：
+$$\boldsymbol{A}\begin{bmatrix}
+  u \\
+  v
+\end{bmatrix} = -\boldsymbol{b}$$
+为一个超定线性方程，使用最小二乘法求解（也可以使用SVD法）即可：
+$$\begin{bmatrix}
+  u \\
+  v
+\end{bmatrix}^* = -(\boldsymbol{A}^T\boldsymbol{A})^{-1} \boldsymbol{A}^T\boldsymbol{b}$$
+光流法的也实现可以使用牛顿高斯法，我们记$e(dx, dy, dt) = \boldsymbol{I}(x + dx, y + dy, t + dt) - \boldsymbol{I}(x, y, t)$为图像两帧之间的灰度差，基于灰度不变假说，我们只需要构建一个最小化误差的最小二乘问题，再利用高斯牛顿法去迭代求解最优$[dx, dy]$即可，其中雅可比矩阵以及各种导数可使用差分求得（即使用离散点进行割线估计）
+同时，在面对像素移动过快时，我们可以使用金字塔层式光流法，即不同倍率的图像位于金字塔不同层，从最小的开始，到最大的，上一层追踪的结果作为下一层的初始值，这个过程也称**由粗至精**的光流，好处是可以通过缩放倍率将快速移动的像素减缓为慢速移动
+
+### 直接法
+在直接法中，我们不会对两个图像中的点进行特征匹配建立点云联系，我们直接使用优化迭代方法逐步优化到最优值，这要求初始值足够的好，否则会导致误差很大，考虑某个空间点$P$和两个时刻的相机，其世界坐标为$[X,Y,Z]$，它在两个相机上的成像的像素坐标为$\boldsymbol{p}_1, \boldsymbol{p}_2$，我们希望找到相机的相对位姿变换，我们以第一个相机为参考系，设第二个相机的旋转和平移为$\boldsymbol{R}, \boldsymbol{t}$（对应李群为$\boldsymbol{T}$），同时相机内参均记为$\boldsymbol{K}$，其完整投影方程为：
+$$\boldsymbol{p}_1 = \begin{bmatrix}
+  u \\
+  v \\
+  1
+\end{bmatrix}_1 = \cfrac{1}{Z_1}\boldsymbol{KP}, \\
+\boldsymbol{p}_2 = \begin{bmatrix}
+  u \\
+  v \\
+  1
+\end{bmatrix}_2 = \cfrac{1}{Z_2}\boldsymbol{K}(\boldsymbol{RP} + \boldsymbol{t}) = \cfrac{1}{Z_2}\boldsymbol{K}(\boldsymbol{TP})_{1:3}$$
+其中$Z_1,Z_2$是P的深度，我们定义**光度误差**：
+$$e = \boldsymbol{I}_1(\boldsymbol{p}_1) - \boldsymbol{I}_2(\boldsymbol{p}_2)$$
+于是目标优化函数为：
+$$\min_{\boldsymbol{T}}J(\boldsymbol{T}) = \| e \| ^2 = \sum\limits_{i = 1}^N e^T_ie_i, e_i = \boldsymbol{I}_1(\boldsymbol{p}_{1,i}) - \boldsymbol{I}_2(\boldsymbol{p}_{2,i})$$
+这里假设空间有$N$个空间点$P_i$，我们记$\boldsymbol{q,u}$分别为$P$在第二相机下的坐标、像素坐标，它们都是$\boldsymbol{T}$的函数，有：
+$$\boldsymbol{q} = \boldsymbol{RP} + \boldsymbol{t}, \boldsymbol{u} = \cfrac{1}{Z_2}\boldsymbol{K}\boldsymbol{q}$$
+所以：
+$$e(\boldsymbol{T}) = \boldsymbol{I}_1(\boldsymbol{p}_1) - \boldsymbol{I}_2(\boldsymbol{u})$$
+于是考虑李代数的左扰动模型，利用一阶泰勒展开得：
+$$\cfrac{\partial e}{\partial \boldsymbol{T}} = \cfrac{\partial \boldsymbol{I}_2}{\partial \boldsymbol{u}} \cfrac{\partial \boldsymbol{u}}{\partial \boldsymbol{q}} \cfrac{\partial \boldsymbol{q}}{\partial \delta \boldsymbol{\xi}} \delta \boldsymbol{ \xi }$$
+其中$\delta \boldsymbol{\xi}$为$\boldsymbol{T}$的左扰动，这三项都是能计算的，前文讲过，我们记误差相对于李代数的雅可比矩阵为$\boldsymbol{J} = -\cfrac{\partial \boldsymbol{I}_2}{\partial \boldsymbol{u}} \cfrac{\partial \boldsymbol{u}}{\partial \delta \boldsymbol{\xi}}$，而根据$P$的来源不同，可以分为**稀疏直接法、半稠密直接法、稠密直接法**，计算占用逐渐上升
+直接法由于图像本身灰度的非凸性（或噪声），而存在许多局部极小值中，光靠梯度进行方向优化很难跳出局部最小值，所以收敛半径很小，只要相机运动过快，就会出现无法继续优化，除非相机运动很小，且图像梯度不会有很强的非凸性，直接法才能成立：
+![alt text](Image//image-7.png)
+直接法的优缺点：
+- 优点：
+  - 1. 省去计算特征点、描述子的实践
+  - 2. 要求图像有梯度即可，不需要特征点，所以它可以在很多特征缺失的场合下使用
+  - 3. 可以构建半稠密乃至稠密的地图
+- 缺点：
+  - 1. 非凸性：
+    直接法完全依靠梯度搜索，如果图像是强烈非凸函数，则会陷入局部最小值，导致收敛困难，而金字塔层的引入可以一定程度上缩小运动的幅度，所以可以一定程度上减小非凸性的影响
+  - 2. 单个像素没有区分度：
+    和某个像素相似的很多，我们要么计算图像块、要么计算复杂的相关性。由于每个像素计算出来的相机运动不一致，只能以数量代替质量，所以如果直接法选点较少时表现下降明显，一般建议用500个点以上
+  - 3. 灰度不变是很强的假设：
+    如果相机自动曝光，会导致灰度整体变化，这样会破坏灰度不变假设，导致优化结果不准确。针对这一点，实用的直接法会同时估计相机的曝光参数，以便在曝光时间变化时也能工作 
