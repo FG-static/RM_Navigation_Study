@@ -259,15 +259,19 @@ geometry_msgs/TwistWithCovariance twist
         name="gz::sim::systems::DiffDrive">
         <left_joint>front_left_wheel_joint</left_joint> 
         <right_joint>front_right_wheel_joint</right_joint>
+        <left_joint>rear_left_wheel_joint</left_joint> 
+        <right_joint>rear_right_wheel_joint</right_joint>
 
-        <wheel_separation>${chassis_width + wheel_width}</wheel_separation>
+        <wheel_separation>0.34</wheel_separation>
         <wheel_radius>${wheel_radius}</wheel_radius>
+        <max_wheel_torque>50</max_wheel_torque> 
+        <max_wheel_acceleration>3.5</max_wheel_acceleration>
 
         <topic>cmd_vel</topic>
         <odom_topic>odom</odom_topic>
+        <tf_topic>/tf</tf_topic>
         <frame_id>odom</frame_id>
         <child_frame_id>base_footprint</child_frame_id>
-        <publish_odom_tf>true</publish_odom_tf>
     </plugin>
 
     <plugin
@@ -285,15 +289,14 @@ geometry_msgs/TwistWithCovariance twist
 <tf_topic>/tf</tf_topic>
 <frame_id>odom</frame_id>
 <child_frame_id>base_footprint</child_frame_id>
-<publish_odom_tf>true</publish_odom_tf>
-<use_gz_time>true</use_gz_time>
 ```
 分别表明订阅速度的话题名称？里程计的话题名称？tf树话题名称？里程计的坐标系名称？里程计要转换到的机器人基准点坐标系名称？以及是否发布tf转换？是否使用gazebo仿真时间？
 配置好后gazebo会代替原本核心框架中的三件事：
 - 订阅`/cmd_vel`并发布速度，它会根据物理学推导最终机器人的位姿
 - 物理仿真
 - 发布里程计话题`/odom`和TF变换（`odom` -> `base_footprint`）
-
+  
+同时，如果是旧版gazebo（`Classic`），它可能还需要更多的参数，具体参数可在网站 https://gazebosim.org/api/sim/9/classgz_1_1sim_1_1systems_1_1DiffDrive.html 上查询，这里也可以查到其他插件的参数和使用方法，这个轮式里程计使用前要注意有没有还使用了其他里程计插件（例如`ground_truth`），如果有的话要注意`/tf`的一一对应，否则会互相抢占话题导致数据混乱
 之后还需要写一个新的launch文件，负责启动robot state publisher、Gazebo、调用`spawn_entity`节点-负责将机器人模型添加到gazebo里、bridge桥接节点-桥接gazebo和ros2的话题（gazebo内部使用$\mathbf{gz~transport}$协议，而ros2内部使用$\mathbf{DDS}$协议，这样会导致ros2无法通过`ros2 topic list`等获取数据）
 （注意：使用jazzy下的gazebo应提前用
 ```bash
