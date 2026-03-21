@@ -219,6 +219,17 @@ $\mathbf{REP-105}$(https://www.ros.org/reps/rep-0105.html)表示至少必须为�
 使用urdf可以快速建模一个机器人，语法和`.xml`是一样的，本节内容在`Ros2 for learning`中已学习，假设我们已经有一个urdf建模的机器人，它拥有四个轮子，长方体身体，一个雷达
 切记定义一个机器人需要定义它的`visual`、`collision`，如果需要更为专业，需要额外定义`inertial`，关于这个标签-物理属性的惯性 的相关公式，可以直接网上查询到
 同时各个关节之间也需要标签`joint`链接，这个标签可以用于发布静态tf转换（注意`odom` -> `base_link`是动态转换）
+除去给机器人建模等内容，我们在定义轮子插件时，可以选择使用差速驱动插件或者使用麦克纳姆轮，这里需要注意的是，麦克纳姆轮对应的插件文件名是`gz-sim-mecanum-drive-system`，对应的插件名是`gz::sim::systems::MecanumDrive`，由于仿真限制，在使用圆柱体型（或者其他模型）作为轮子时，并不能实现麦克纳姆轮的效果，你需要使用`gz::sim::systems::VelocityControl`插件，直接控制模型移动（毕竟是仿真）
+如果还想给轮子导入麦克纳姆轮模型，可以使用例：
+```xml
+<mesh filename="package://my_nav2_robot/meshes/mecanum_${prefix}_hands.stl" scale="0.001 0.001 0.001"/>
+```
+导入一个位于功能包`my_nav2_robot`（必填）的文件夹`meshes`下的`.stl`模型文件，后面的`scale`参数是缩放比例。必须要注意的一点是，你需要在运行前使用`export GZ_SIM_RESOURCE_PATH=$GZ_SIM_RESOURCE_PATH:~/your_ws/src/`来设置gz的环境变量，以便它能读取轮子模型，你也可以使用`nano ~/.bashrc`打开配置文件后最后一行输入：
+```bash
+# 添加 Gazebo 模型资源路径
+export GZ_SIM_RESOURCE_PATH=$GZ_SIM_RESOURCE_PATH:~/nav2_test/src/
+```
+这样gz就能读取了
 
 #### 里程计系统
 我们可以从各种传感器硬件中获取里程计信息，如IMU($\mathbf{Inertial~Measurement~Unit}$)-惯性测量单元、LIDAR、RADAR等，odom框架与之相关
