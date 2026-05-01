@@ -4437,5 +4437,205 @@ int main(int argc, char **argv) {
 ```
 进行插件加载，其中`<!--全局挂载插件-->`下方的代码是必须的，同时不能有其他的`gz::sim::systems::Sensors`插件被加载，否则会导致二次加载gazebo崩溃（所以你需要去除雷达插件的该插件加载，额外写出来）
 
+---
+
+# FAST-LIO2 (ROS2) LiDAR-IMU 里程计
+
+## 项目简介
+
+FAST-LIO2：基于 tight-coupled iterated extended Kalman filter 的 LiDAR-IMU 融合里程计，支持 spinning（Velodyne/Ouster）和 solid-state（Livox Avia/MID-360/Horizon）激光雷达。
+
+- 源码：https://github.com/hku-mars/FAST_LIO/tree/ROS2（ROS2 分支）
+- 论文：FAST-LIO2: Fast Direct LiDAR-inertial Odometry
+
+---
+
+## 必备依赖安装
+
+### Eigen3（>= 3.3.4）
+
+```bash
+sudo apt install libeigen3-dev
+```
+
+### PCL（>= 1.8）
+
+```bash
+sudo apt install libpcl-dev
+```
+
+### OpenMP（可选，用于多核加速）
+
+```bash
+sudo apt install libomp-dev
+```
+
+### matplotlibcpp.h（C++ matplotlib 封装，header-only，用于绘图）
+
+```bash
+sudo apt install python3-matplotlib
+git clone https://github.com/lava/matplotlib-cpp.git
+cd matplotlib-cpp
+sudo cp matplotlibcpp.h /usr/local/include/
+```
+
+### Python3 + matplotlib
+
+```bash
+sudo apt install python3-dev python3-matplotlib
+```
+
+### ROS2 pcl 桥接
+
+```bash
+sudo apt install ros-<distro>-pcl-ros ros-<distro>-pcl-conversions
+```
+
+> 示例：`ros-jazzy-pcl-ros ros-jazzy-pcl-conversions`
+
+---
+
+## livox_ros_driver2 安装
+
+FAST-LIO 编译时必须依赖 livox_ros_driver2（即使实际使用非 Livox 雷达）。
+
+```bash
+# 创建独立工作空间
+mkdir -p ~/fastlio/livox_ws/src
+cd ~/fastlio/livox_ws/src
+
+# 推荐使用 Ericsii 的 fork（修复了单位标准问题）
+git clone https://github.com/Ericsii/livox_ros_driver2.git -b feature/use-standard-unit
+
+# 编译
+cd ..
+source /opt/ros/<distro>/setup.bash
+colcon build --symlink-install
+```
+
+编译完成后每次使用前需要 source：
+
+```bash
+source ~/fastlio/livox_ws/install/setup.bash
+```
+
+---
+
+## FAST-LIO 编译
+
+```bash
+cd ~/fastlio
+git clone -b ROS2 https://github.com/hku-mars/FAST_LIO.git
+cd FAST_LIO
+
+# 初始化子模块（ikd-Tree）
+git submodule update --init --recursive
+```
+
+> **注意**：ROS2 Jazzy（Ubuntu 24.04）的 rclcpp 要求 C++17，而原项目 CMakeLists.txt 硬编码了 `-std=c++14`，编译时会报模板错误。需要在 `CMakeLists.txt` 中将所有 `-std=c++14` 改为 `-std=c++17`，并将 `CMAKE_CXX_STANDARD 14` 改为 `CMAKE_CXX_STANDARD 17`。
+
+```bash
+source /opt/ros/<distro>/setup.bash
+source ~/fastlio/livox_ws/install/setup.bash
+colcon build --symlink-install
+source install/setup.bash
+```
+
+---
+
+## 启动与运行 rosbag
+
+### 单步启动（推荐）
+
+已编写一体化 launch 文件 `launch/run_bag.launch.py`，内部自动 source livox_ws + FAST_LIO，只需在终端中：
+
+```bash
+source /opt/ros/<distro>/setup.bash
+ros2 launch fast_lio run_bag.launch.py
+```
+
+launch 文件默认参数：
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `config_file` | `mid360.yaml` | 雷达配置文件 |
+| `bag_path` | `~/fastlio/rosbag2_mid360_10hz` | rosbag 路径 |
+| `use_sim_time` | `true` | 使用 bag 时间戳 |
+| `rviz` | `true` | 是否打开 rviz |
+
+可覆盖参数：
+
+```bash
+ros2 launch fast_lio run_bag.launch.py config_file:=velodyne.yaml bag_path:=/path/to/your.bag
+```
+
+### 分步启动（调试用）
+
+终端 1 — 启动 FAST-LIO：
+
+```bash
+source /opt/ros/<distro>/setup.bash
+source ~/fastlio/livox_ws/install/setup.bash
+source ~/fastlio/FAST_LIO/install/setup.bash
+
+ros2 launch fast_lio mapping.launch.py \
+  config_path:=~/fastlio/FAST_LIO/config \
+  config_file:=mid360.yaml \
+  use_sim_time:=true \
+  rviz:=true
+```
+
+终端 2 — 播放 rosbag：
+
+```bash
+source /opt/ros/<distro>/setup.bash
+ros2 bag play ~/fastlio/rosbag2_mid360_10hz --clock
+```
+
+---
+
+## 配置文件说明
+
+`config/` 目录下预置了各雷达型号的配置文件：
+
+| 文件 | lidar_type | scan_line | 适用 |
+|---|---|---|---|
+| `mid360.yaml` | 1 (Livox) | 4 | Livox MID-360 |
+| `avia.yaml` | 1 (Livox) | 6 | Livox Avia |
+| `horizon.yaml` | 1 (Livox) | 6 | Livox Horizon |
+| `velodyne.yaml` | 2 (Velodyne) | 16/32/64 | Velodyne HDL/VLP |
+| `ouster64.yaml` | 3 (Ouster) | 64 | Ouster OS1 |
+
+关键参数：
+
+- `lid_topic` / `imu_topic`：必须与 rosbag 中实际 topic 名一致
+- `lidar_type`：1=Livox, 2=Velodyne, 3=Ouster, 4=其他
+- `point_filter_num`：跳帧数，越大越省算力但精度下降
+- `extrinsic_est_en`：是否在线估计 IMU-LiDAR 外参
+- `pcd_save_en`：结束后是否保存点云到 `PCD/scans.pcd`
+
+---
+
+## 实验记录（Mid-360 rosbag）
+
+- rosbag：`rosbag2_mid360_10hz`（877.6 MiB）
+- 时长：约 99 秒
+- Topic：`/livox/lidar`（CustomMsg）+ `/livox/imu`（sensor_msgs/Imu）
+- 编译环境：ROS2 Jazzy + Ubuntu 24.04
+- C++ 标准需改为 C++17（因 Jazzy 的 rclcpp 要求）
+
+结果示意图：
+![alt text](Image//image-25.png)
+
+---
+
+## 注意事项
+
+1. **rosbag 版本**：ROS1 的 `.bag` 需要先转为 ROS2 格式（使用 `rosbags` 库）
+2. **时间同步**：播放 bag 必须加 `--clock` 参数，FAST-LIO 需设 `use_sim_time:=true`
+3. **Livox 驱动模式**：Livox 雷达仅支持 `livox_lidar_msg.launch` 模式（产生 `CustomMsg` 含每点时间戳），`livox_lidar.launch` 模式不支持
+4. **点云保存**：`pcd_save_en` 设为 `true`，结束时自动保存 `PCD/scans.pcd`
+5. **ikd-Tree 子模块**：clone 后务必执行 `git submodule update --init --recursive`
+
 ### 通信串口
 导航，算法平台算得的所有数据，最后都要通过一个协议通信串口传给电机等电控面板，最后由它们负责让小车跑起来。其中这个协议通信串口并不是一个桥接器，当我们在gazebo跑仿真时，需要桥接器将ros2的数据和gazebo的数据互传（也可以单向），在有实物的情况下，我们不需要启动gazebo仿真了，桥接器也不需要了，只需要一个通信节点，它将自动读取话题（例如`/cmd_vel`等），并打包成符合电机通信的格式发送（自己编写一个`.cpp`或使用$\text{ASIO}$或$\text{Linux}$自带的函数）给对应电机，我们不需要更改算法层面的代码，两个部分是解耦的
