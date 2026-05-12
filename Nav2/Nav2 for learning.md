@@ -1754,6 +1754,16 @@ PLUGINLIB_EXPORT_CLASS(my_mpc_controller::MyMPCController, nav2_core::Controller
 ```
 cmake文件和`package.xml`和`plugins.xml`文件大部分是一样的，需要修改的地方在于插件名字和项目名字方面，同时还需要注意`Eigen`库依赖也要写上
 
+#### $\text{TEB, Timed-Elastic-Band}$
+teb局部路径规划算法也是一种常见好用的算法，它的规划原理是：
+- 全局规划起器/手动指定起点$S$和终点$T$
+- 通过确定的时间间隔，在这条$ST$直线路径上生成若干路径点（包含位姿状态量）
+- 设置若干约束，使用约束（外力）改变路径点的位姿
+- 所有路径点变化后，其会牵引其他路径点一起变化（通过最大/最小加速度或最大/最小角加速度约束），最终得到完全约束好的若干条可行曲线
+- 在所有曲线中找到最快的曲线（最短不一定最快，这个是可选的）
+
+在实际中，一般使用`g2o`库进行对轨迹的图优化
+
 #### 误差计算
 通过$\mathrm{Sophus}$库可以将我们的`/odom`话题下的位姿和在gazebo仿真中的位姿结合来计算轨迹误差$\boldsymbol{T}_{\mathrm{err}}$
 在此之前我们需要安装`tf2_eigen`以及`Sophus`库，前者一般已经安装完毕了（可以通过`sudo apt install ros-<ros-distro>-tf2-eigen`查看），后者最好是安装**模板类**版本的库：
@@ -3287,7 +3297,8 @@ PLUGINLIB_EXPORT_CLASS(my_rrtstar_planner::MyRRTStarPlanner, nav2_core::GlobalPl
 ##### 概论
 平滑算法中最常用的就是梯度下降平滑
 该算法主要由两个参数$\alpha ,\beta$主导，分别是**平滑力权重**和**保持力权重**，分别用于**平滑路径**和**保持原路径**。具体来说就是该算法由以下公式决定：
-$$P_i\leftarrow P_i + \alpha(P_{i - 1} + P_{i + 1} - 2P_i) + \beta(P_{i,\mathrm{original}} - P_i)$$其中$P_i$表示第$i$个路径点（一条路径在nav2中一般是`nav_msgs::msg::Path`类型，类似一个数组容器，里面由若干个路径点组成），而$P_{i,\mathrm{original}}$表示在经过平滑前的原始路径点（在第一次平滑前），利用该公式，算法进行若干次（由`max_iteration`决定）循环平滑（每次平滑都要用这个公式处理所有节点），这个公式的意义就是把路径点拉向两个路径点中心，但是为了防止过度拉扯导致可能碰到障碍物，所以需要最原始的路径点进行拉回路径，且我们需要使用代价地图中的代价等来判断是否回退（即放弃此次平滑，因为撞墙了），同时在平滑路径点后，该点的朝向（每个路径点都存储了小车此刻应有的位姿）也要修正，需使用四元数
+$$P_i\leftarrow P_i + \alpha(P_{i - 1} + P_{i + 1} - 2P_i) + \beta(P_{i,\mathrm{original}} - P_i)$$
+其中$P_i$表示第$i$个路径点（一条路径在nav2中一般是`nav_msgs::msg::Path`类型，类似一个数组容器，里面由若干个路径点组成），而$P_{i,\mathrm{original}}$表示在经过平滑前的原始路径点（在第一次平滑前），利用该公式，算法进行若干次（由`max_iteration`决定）循环平滑（每次平滑都要用这个公式处理所有节点），这个公式的意义就是把路径点拉向两个路径点中心，但是为了防止过度拉扯导致可能碰到障碍物，所以需要最原始的路径点进行拉回路径，且我们需要使用代价地图中的代价等来判断是否回退（即放弃此次平滑，因为撞墙了），同时在平滑路径点后，该点的朝向（每个路径点都存储了小车此刻应有的位姿）也要修正，需使用四元数
 
 ##### 实践
 我们可以利用这个简单写一个平滑器，在这个平滑其中我们不额外对路径进行额外线性插值（我们假设在规划器中已经做好了对路径疏密程度的处理），只进行路径平滑。同样，先进行功能包创建：
@@ -4636,6 +4647,276 @@ ros2 bag play ~/fastlio/rosbag2_mid360_10hz --clock
 3. **Livox 驱动模式**：Livox 雷达仅支持 `livox_lidar_msg.launch` 模式（产生 `CustomMsg` 含每点时间戳），`livox_lidar.launch` 模式不支持
 4. **点云保存**：`pcd_save_en` 设为 `true`，结束时自动保存 `PCD/scans.pcd`
 5. **ikd-Tree 子模块**：clone 后务必执行 `git submodule update --init --recursive`
+
+---
+
+## PB_RM_Simulation 仿真项目搭建
+
+> 项目地址：https://github.com/LihanChen2004/pb_rm_simulation
+> 深圳北理莫斯科大学北极熊战队 RoboMaster 哨兵导航仿真/实车包
+> 技术栈：ROS 2 Humble + Gazebo Classic 11 + Navigation2 + FAST_LIO/Point_LIO
+
+### 项目简介
+
+- 全向移动小车（麦克纳姆轮）+ Livox Mid-360 雷达 + IMU
+- 在 RMUC（7V7）/ RMUL（3V3）地图中进行导航仿真
+- 支持边建图边导航（mapping）和已知地图导航（nav）两种模式
+- 仿真参数可直接移植到实车
+
+### 环境要求
+
+| 项目 | 要求 |
+|------|------|
+| 系统 | Ubuntu 22.04 |
+| ROS | ROS 2 Humble |
+| 仿真器 | Gazebo Classic 11 |
+| 其他 | Livox SDK2, Docker (可选) |
+
+> **注意**：项目基于 Gazebo Classic 11，在 Ubuntu 24.04 + ROS 2 Jazzy + Gazebo Harmonic 下无法直接编译（Gazebo Classic API 已移除）。建议使用 Docker 容器运行。
+
+### 方式一：Docker 运行（推荐）
+
+#### 1. 安装 Docker
+
+```bash
+# 卸载旧版本
+sudo apt remove -y docker docker-engine docker.io containerd runc 2>/dev/null
+
+# 安装依赖
+sudo apt update && sudo apt install -y ca-certificates curl gnupg
+
+# 添加 Docker GPG key
+sudo install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+sudo chmod a+r /etc/apt/keyrings/docker.gpg
+
+# 添加 Docker 源
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+# 安装 Docker
+sudo apt update && sudo apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+
+# 免 sudo 使用 docker
+sudo usermod -aG docker $USER
+newgrp docker
+```
+
+如果 Docker 拉取镜像超时，配置国内镜像源：
+
+```bash
+sudo tee /etc/docker/daemon.json <<-'EOF'
+{
+  "registry-mirrors": [
+    "https://docker.1ms.run",
+    "https://docker.xuanyuan.me"
+  ]
+}
+EOF
+sudo systemctl daemon-reload
+sudo systemctl restart docker
+```
+
+#### 2. 克隆项目
+
+```bash
+cd ~
+git clone --recursive https://github.com/LihanChen2004/pb_rm_simulation.git
+cd pb_rm_simulation
+```
+
+> **注意**：`costmap_converter` 子模块的原作者 fork（LihanChen2004）可能已被删除，需修改 `.gitmodules` 中的 URL 为原版仓库：
+> ```bash
+> # 修改 .gitmodules 中 costmap_converter 的 url
+> # 从 https://github.com/LihanChen2004/costmap_converter.git
+> # 改为 https://github.com/rst-tu-dortmund/costmap_converter.git
+> ```
+
+#### 3. 编写 Dockerfile
+
+原项目的 `dockerfile` 有若干问题（鱼香ROS 换源失败、sudo 不需要、pip 限制等），重写如下：
+
+```dockerfile
+FROM ros:humble-ros-base
+
+RUN mkdir -p /ros_ws
+WORKDIR /ros_ws/
+
+# 安装所有依赖（一次性装完）
+RUN apt-get update && apt-get install -y \
+    wget python3-pip python3-rosdep \
+    clang clangd clang-format \
+    cmake git zsh \
+    libgoogle-glog-dev libeigen3-dev libsuitesparse-dev \
+    libg2o-dev libg2o-types-slam2d libg2o-types-slam3d \
+    libg2o-stuff-sampler libg2o-solver-cholmod libg2o-solver-eigen libg2o-solver-csparse \
+    ros-humble-nav2-dwb-controller \
+    && rosdep init 2>/dev/null || true \
+    && rosdep update \
+    && rm -rf /var/lib/apt/lists/*
+
+# 安装 Livox SDK2
+RUN git clone https://github.com/Livox-SDK/Livox-SDK2.git && \
+    cd ./Livox-SDK2/ && \
+    mkdir build && \
+    cd build && \
+    cmake .. && make -j$(nproc) && \
+    make install
+
+# setup zsh (可选)
+RUN sh -c "$(wget -O- https://github.com/deluan/zsh-in-docker/releases/download/v1.2.0/zsh-in-docker.sh)" -- \
+    -t jispwoso -p git \
+    -p https://github.com/zsh-users/zsh-autosuggestions \
+    -p https://github.com/zsh-users/zsh-syntax-highlighting && \
+    chsh -s /bin/zsh
+
+RUN echo 'export TERM=xterm-256color\n\
+source /opt/ros/humble/setup.zsh\n\
+eval "$(register-python-argcomplete3 ros2)"\n\
+eval "$(register-python-argcomplete3 colcon)"\n'\
+>> /root/.zshrc
+
+RUN sed --in-place --expression \
+    '$isource "/opt/ros/humble/setup.sh"' \
+    /ros_entrypoint.sh
+```
+
+#### 4. 构建镜像
+
+```bash
+cd ~/pb_rm_simulation
+docker build -t pb_rm_simulation .
+```
+
+#### 5. 启动容器
+
+```bash
+# 允许 X11 转发
+xhost +local:docker
+
+# 启动容器
+docker run -it --rm \
+  --privileged \
+  -e DISPLAY=$DISPLAY \
+  -e QT_X11_NO_MITSHM=1 \
+  -v /tmp/.X11-unix:/tmp/.X11-unix \
+  --network=host \
+  -v ~/pb_rm_simulation:/ros_ws/pb_rm_simulation \
+  pb_rm_simulation
+```
+
+#### 6. 容器内编译
+
+```bash
+cd /ros_ws/pb_rm_simulation
+
+# 修复 git 安全目录问题
+git config --global --add safe.directory '*'
+
+# 拉取子模块（如已在宿主机拉取过可跳过）
+git submodule update --init --recursive
+
+# 安装依赖
+rosdep install -r --from-paths src --ignore-src -y
+
+# 编译
+colcon build --symlink-install
+
+# 设置环境
+source install/setup.bash
+```
+
+### 方式二：原生安装（Ubuntu 22.04 + ROS 2 Humble）
+
+#### 1. 安装 Livox SDK2
+
+```bash
+sudo apt install cmake
+git clone https://github.com/Livox-SDK/Livox-SDK2.git
+cd Livox-SDK2 && mkdir build && cd build
+cmake .. && make -j && sudo make install
+```
+
+#### 2. 克隆并编译
+
+```bash
+cd ~
+git clone --recursive https://github.com/LihanChen2004/pb_rm_simulation.git
+cd pb_rm_simulation
+rosdep install -r --from-paths src --ignore-src -y
+colcon build --symlink-install
+source install/setup.bash
+```
+
+### 运行仿真
+
+#### 边建图边导航
+
+```bash
+ros2 launch rm_nav_bringup bringup_sim.launch.py \
+  world:=RMUL \
+  mode:=mapping \
+  lio:=fastlio \
+  lio_rviz:=False \
+  nav_rviz:=True
+```
+
+#### 已知全局地图导航
+
+```bash
+ros2 launch rm_nav_bringup bringup_sim.launch.py \
+  world:=RMUL \
+  mode:=nav \
+  lio:=fastlio \
+  localization:=slam_toolbox \
+  lio_rviz:=False \
+  nav_rviz:=True
+```
+
+#### 参数说明
+
+| 参数 | 可选值 | 说明 |
+|------|--------|------|
+| `world` | `RMUL` / `RMUC` | 仿真地图（3V3 / 7V7） |
+| `mode` | `mapping` / `nav` | 边建图边导航 / 已知地图导航 |
+| `lio` | `fastlio` / `pointlio` | LIO 算法（Point_LIO 频率更高但 CPU 占用更大） |
+| `localization` | `slam_toolbox` / `amcl` / `icp` | 定位算法（仅 `nav` 模式有效） |
+| `lio_rviz` | `True` / `False` | 是否显示 LIO 点云可视化 |
+| `nav_rviz` | `True` / `False` | 是否显示 Navigation2 可视化 |
+
+#### 键盘控制小车
+
+```bash
+ros2 run teleop_twist_keyboard teleop_twist_keyboard
+```
+
+### 项目架构
+
+```
+pb_rm_simulation/
+├── src/
+│   ├── rm_driver/              # Livox 驱动（livox_ros_driver2 子模块）
+│   ├── rm_localization/        # 定位（FAST_LIO, Point_LIO, ICP）
+│   ├── rm_navigation/          # 导航（Nav2 参数, TEB 规划器, fake_vel_transform）
+│   ├── rm_nav_bringup/         # 顶层 launch + 配置
+│   ├── rm_perception/          # 感知（点云转激光, 地面分割, IMU 滤波）
+│   └── rm_simulation/          # Gazebo 仿真（世界模型, Livox 仿真插件）
+```
+
+### 关键话题接口
+
+| Topic | Type | 说明 |
+|-------|------|------|
+| `/livox/lidar` | `livox_ros_driver2/msg/CustomMsg` | Livox Mid360 点云 |
+| `/livox/lidar/pointcloud` | `sensor_msgs/msg/PointCloud2` | ROS2 标准点云 |
+| `/livox/imu` | `sensor_msgs/msg/Imu` | IMU 数据 |
+| `/cmd_vel` | `geometry_msgs/msg/Twist` | 运动控制 |
+
+### 实车适配要点
+
+1. **雷达 IP**：修改 `src/rm_nav_bringup/config/reality/MID360_config.json` 中的 `lidar_configs.ip`
+2. **雷达-底盘偏移**：修改 `measurement_params_real.yaml` 中的 x, y 坐标
+3. **雷达离地高度**：修改 `segmentation_real.yaml` 中的 `sensor_height`
+4. **Nav2 参数**：主要调整 `robot_radius` 和速度参数
 
 ### 通信串口
 导航，算法平台算得的所有数据，最后都要通过一个协议通信串口传给电机等电控面板，最后由它们负责让小车跑起来。其中这个协议通信串口并不是一个桥接器，当我们在gazebo跑仿真时，需要桥接器将ros2的数据和gazebo的数据互传（也可以单向），在有实物的情况下，我们不需要启动gazebo仿真了，桥接器也不需要了，只需要一个通信节点，它将自动读取话题（例如`/cmd_vel`等），并打包成符合电机通信的格式发送（自己编写一个`.cpp`或使用$\text{ASIO}$或$\text{Linux}$自带的函数）给对应电机，我们不需要更改算法层面的代码，两个部分是解耦的
