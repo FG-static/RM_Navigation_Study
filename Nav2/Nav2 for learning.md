@@ -1762,7 +1762,91 @@ teb局部路径规划算法也是一种常见好用的算法，它的规划原�
 - 所有路径点变化后，其会牵引其他路径点一起变化（通过最大/最小加速度或最大/最小角加速度约束），最终得到完全约束好的若干条可行曲线
 - 在所有曲线中找到最快的曲线（最短不一定最快，这个是可选的）
 
-在实际中，一般使用`g2o`库进行对轨迹的图优化
+在实际中，一般使用`g2o`库进行对轨迹的图优化，以麦克纳姆轮小车项目为例，如果我们要构建一个TEB局部路径规划节点，先用
+```bash
+sudo apt-get install libg2o-dev
+```
+安装g2o库，先以无动态障碍物，仅静态障碍物为例实现精简版
+
+##### 图优化算法的根本创新点
+图优化算法实际上也是求解一个QP问题，但是不同于代数方法求解，它使用图来描述这个qp问题，并结合图特有的特性来解决qp问题
+- 1. 用图来“维护”矩阵
+  我们知道可以用矩阵来表示一个图，由于在teb算法中，一个待优化节点最多有三条边与其他节点相连，包括约束节点和其他相邻的待优化节点，这表明最后维护图的矩阵是一个稀疏矩阵，稀疏矩阵在求解qp问题时对计算性能非常友好。（详细来说，这里节点用邻接表储存，一个节点只代表一个指针，对于动态的节点数量来说，增删节点维护一个图很容易，而代数方法每次都要算csc矩阵重构高维矩阵，性能开销很大）
+- 2. 定义流形算子
+  图优化通过定义流形上的“加”和“减”算子，其对涉及角度变量的更新和计算非常方便（在求导时，在切空间内求，这样所有运算法则都统一，只有更新时才映射回四元数。而代数方法，一般需用四元数表达角度相关式子，其很难在对一整个矩阵处理时，不同位置运用不同的运算法则）
+- 3. 增量更新的“剪枝”能力
+  代数上，每一帧雷达数据进来，都要重新计算$\text{Hessian}$矩阵，开销很大。而图上，将图换化为**贝叶斯树**，当新节点加入时，无需重构H矩阵，正如第一点所描述，这个矩阵不仅是稀疏矩阵，而且不是每一个位置都与其他位置相关，只需要通过树结构发现与新节点相关的路径，并对矩阵某块进行微调即可
+
+##### 结构框架搭建
+既然使用图优化进行构建算法节点，那么就需要准备好这个算法框架需要的头文件部分：
+- 自定义数据结构 `teb_types.hpp`
+- 自定义图优化节点的“注入”算法（例如$\oplus$和$\ominus$） `teb_vertices.hpp`
+- 自定义图优化约束边的声明和定义 `teb_edges.hpp`
+- 图优化的优化步骤 `teb_graph_optimizer.hpp`
+- 图优化适配层 `teb_controller.hpp`
+
+##### 自定义数据结构
+考虑到图优化必要的节点，我们需要定义至少三个数据结构：
+- `PoseSE2`: 自定义原始路径点存储结构
+- `TimedPose`: 自定义记录该路径点与上一个路径点的时间间隔
+- `MecanumVelocity`: 麦克纳姆轮体系下的速度结构
+
+如果需要的话，可以额外定义`TebConfig`用于加载teb算法参数
+
+##### 自定义图优化节点“注入”算法
+为了在图优化中进行**状态更新**和**残差计算**，$\oplus$和$\ominus$算子是必要的，分别对应"加"和“减”
+在不使用自定义节点情况下（例如仅使用默认节点`VertexSE3Expmap`、`VertexPointXY`、`VertexSE3`等），我们可以直接调用对应类内的函数不需要重写，如果需要重写，则必须重写以下两个类内的函数：
+- VertexPose类下的`void setToOriginTmpl()`函数与`void oplusImpl(const double *update)`函数
+- VertexTimeDiff类下的`void setToOriginTmpl()`函数与`void oplusImpl(const double *update)`函数
+
+前者用于设置初始值，后者用于更新值（因为前者是路径节点，后者是时间间隔节点），在图优化中，我们需要将`update`中的值加到`x_`中，因此需要重写`oplusImpl`函数
+
+##### 自定义图优化约束边
+在图优化中，我们需要定义约束边，在teb算法中，我们需要定义以下约束边：
+- 目标点约束边（`EdgeGoalPose`）
+- 原始路径点约束边（`EdgePathAnchor`）
+- 最短路径约束边（`EdgeShortestPath`）
+- 最优时间路径约束边（`EdgeTimeOptimal`）
+- 速度限制约束边（`EdgeVelocityHolonomic`）
+- 速度限制约束边（`EdgeAccelerationHolonomic`）
+- 障碍物约束边（`EdgeObstacle`）
+  
+所有约束边都要重写`void computeError()`函数，用于计算残差，在图优化中，我们需要将残差存储在`e_`中，因为图优化的目的是最小化残差和，所以这个很重要
+
+##### 图优化优化步骤
+先定义一个优化器类`TebGraphOptimizer`，这个类需要包含以下函数：
+- 初始化求解器函数 `bool initialzeSolver(bool verbose)`
+  用于构建$\text{Hessian}$矩阵和其线性求解器
+- 主要优化函数
+```cpp
+bool optimize(
+    std::vector<TimedPose> &trajectory,
+    const std::vector<TimedPose> &reference_trajectory,
+    const PoseSE2 &goal_pose,
+    const ObstacleSamples &obstacles,
+    const TebConfig &config,
+    bool verbose);
+```
+  用于优化轨迹，并在最后通过`copyBack()`函数将优化后的轨迹传到实际调用数组`trajectory`，同时也可以用于为下一帧优化
+- 建图函数
+```cpp
+bool buildGraph(
+    const std::vector<TimedPose> &trajectory,
+    const std::vector<TimedPose> &reference_trajectory,
+    const PoseSE2 &goal_pose,
+    const ObstacleSamples &obstacles,
+    const TebConfig &config,
+    bool verbose);
+```
+  用于构建图优化中的节点和边，并进行优化前的准备工作
+- 路径转换函数 `void copyBack(std::vector<TimedPose> &trajectory, const TebConfig &config) const`：
+  用于将优化后的路径，从自定义图优化数据结构转化为外部调用的路径数据结构
+
+除此之外，还可以定义`void clear()`函数和`Eigen::Vector2d findNearestObstacle(const PoseSE2 &pose, const ObstacleSamples &obstacles) const;`函数
+
+##### 图优化适配层
+这是为了连接nav接口层面与图优化层面的适配层，实际上整个图优化和输入输出数据流程都是在这个节点进行的，只是图优化方面，单独包装成了几个接口函数，可以通过函数调用图优化
+因此本文件只需构建controller插件所需的对应函数重载以及图优化接口函数即可
 
 #### 误差计算
 通过$\mathrm{Sophus}$库可以将我们的`/odom`话题下的位姿和在gazebo仿真中的位姿结合来计算轨迹误差$\boldsymbol{T}_{\mathrm{err}}$
