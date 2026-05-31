@@ -1,0 +1,5 @@
+CompileFlags:
+  Add:
+    - "-IE:/OpenCV/opencv/build/include"
+    - "--driver-mode=cl"
+    - "/std:c++14"

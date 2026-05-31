@@ -30,7 +30,7 @@ public:
     // RRT* 参数
     double step_size = 1.0; // 扩展步长，单位 m
     int max_iterations = 50000; // 最大迭代次数
-    double 
+    double
         search_radius = 2.0, // 用于重连
         goal_sample_rate = 0.5, // 采样直接采中目标的概率
         goal_tolerance = 0.2, // 认为到达目标的距离阈值，单位 m

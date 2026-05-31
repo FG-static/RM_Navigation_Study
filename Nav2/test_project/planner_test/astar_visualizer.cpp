@@ -19,8 +19,8 @@ void MapPlanner::preprocessMap() {
 
     // 腐蚀核Size(9, 9) -> r=4
     // 4像素*0.05 分辨率=0.2
-    int robot_radius_pixel = 4; 
-    cv::Mat element = cv::getStructuringElement(cv::MORPH_RECT, 
+    int robot_radius_pixel = 4;
+    cv::Mat element = cv::getStructuringElement(cv::MORPH_RECT,
                       cv::Size(2 * robot_radius_pixel + 1, 2 * robot_radius_pixel + 1));
     cv::erode(map_img, map_img, element);
 }
@@ -50,7 +50,7 @@ void MapPlanner::plan(cv::Point start, cv::Point goal) {
 
     // 寻路
     while (!open_list.empty()) {
-        
+
         Node cur = open_list.top();
         open_list.pop();
         display_map.at<cv::Vec3b>(cur.pos.y, cur.pos.x) = cv::Vec3b(200, 200, 255);
@@ -88,14 +88,14 @@ void MapPlanner::plan(cv::Point start, cv::Point goal) {
                 cv::Point nei_pos(cur.pos.x + dx, cur.pos.y + dy);
 
                 // 边界与碰撞检查
-                if (nei_pos.x < 0 || nei_pos.x >= map_img.cols || 
+                if (nei_pos.x < 0 || nei_pos.x >= map_img.cols ||
                     nei_pos.y < 0 || nei_pos.y >= map_img.rows) continue;
                 if (map_img.at<uchar>(nei_pos.y, nei_pos.x) == 0) continue;
 
                 // 未知区域罚分
                 uchar raw_pixel = raw_map.at<uchar>(nei_pos.y, nei_pos.x);
                 double extra_cost = 0.0;
-                if (raw_pixel < 250 && raw_pixel > 150) { 
+                if (raw_pixel < 250 && raw_pixel > 150) {
 
                     extra_cost = 10.0;
                 }
@@ -121,12 +121,12 @@ void MapPlanner::plan(cv::Point start, cv::Point goal) {
                 }
             }
         }
-    } 
+    }
 }
 int main() {
-    
+
     MapPlanner planner("map1.pgm");
-    
+
     cv::Point start_px = planner.WorldToMap(-4.0, 1.0);
     cv::Point goal_px = planner.WorldToMap(1.0, -3.0);
 

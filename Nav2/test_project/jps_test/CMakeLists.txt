@@ -1,18 +1,15 @@
 cmake_minimum_required(VERSION 3.10)
-project(planner_test)
+project(jps_test)
 set(CMAKE_CXX_STANDARD 14)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 add_compile_options(/utf-8)
 
-# 找
 find_package(OpenCV REQUIRED)
 
-# 添加可执行文件
-add_executable(planner_test 
-    astar_visualizer.cpp
+add_executable(jps_test
+    jps_visualizer.cpp
 )
 
-# 链接 OpenCV 库
-target_link_libraries(planner_test 
+target_link_libraries(jps_test
     ${OpenCV_LIBRARIES}
 )
