@@ -19,6 +19,13 @@
 - **效率优化**：选择能使目标最快到达节点的弹出规则
 - **扩展控制**：通过优化节点访问顺序减少不必要节点的扩展
 
+#### 图搜索构建方法
+一般有两种图搜索构建方法：
+- **正向构建**：即从控制空间离散化（如4/8向移动）
+  需要事先划分地图为格子，然后先定死机器人的位置，不管机器人的运动，例如AStar,Dijkstra算法等
+- **反向构建**：即从状态空间离散化（如PRM采样）
+  不需要事先划分地图为格子，但是同样事先定死机器人的运动（控制输入等），划分格子依旧需要但不是主要功能，例如Hybird AStar等运动学规划算法等
+
 ### 启发式代价
 #### 可纳性
 我们称**AStar**算法是**可纳的**$\text{admissible}$，即此时AStar算法可以取得最优结果，当且仅当其启发式代价函数$h(x)\leq h^*(x)$，其中$h^*(x)$表示从起点到目标的真实最短路径代价，即启发式代价函数不会高估实际路径代价，例如取0或$L_{infty}$或欧氏距离，总是可纳的，若取曼哈顿距离，则不一定可纳（这里的$L$是范数，我们称$L_p$范数的数学定义公式为：
@@ -94,3 +101,72 @@ $$
 3. 最后，保留较优路径，对其节点求均值构建新多高斯模型（逐渐缩小分布范围，不断优化），重复多步直至收敛或者达到迭代次数
 
 缺点是高斯分布的协方差参数需要额外研究，防止无法收敛和陷入局部最优
+
+### 基于动力学的路径规划
+#### 运动学模型
+我们一般使用$s$表示机器人状态，即$\dot{s} = f(s, u)$，其中$s$是状态向量，$u$是控制输入向量
+- 独轮车模型：
+  $$
+  \begin{bmatrix}
+    \dot{x} \\
+    \dot{y} \\
+    \dot{\theta}
+  \end{bmatrix}
+  =
+  \begin{bmatrix}
+    v \cos(\theta) \\
+    v \sin(\theta) \\
+    \omega
+  \end{bmatrix} 
+  $$
+  其中$v$是速度，$\omega$是角速度
+- 差速驱动模型：
+  $$
+  \begin{bmatrix}
+    \dot{x} \\
+    \dot{y} \\
+    \dot{\theta}
+  \end{bmatrix}
+  =
+  \begin{bmatrix}
+    v_l \cos(\theta) \\
+    v_l \sin(\theta) \\
+    \omega
+  \end{bmatrix}
+  $$
+  其中$v_l = \cfrac{r}{2}(\omega_l + \omega_r)\cos(\theta)$，$\omega = \cfrac{r}{L}(\omega_r - \omega_l)$，$\omega_l$和$\omega_r$分别是左轮和右轮的角速度，$r$是轮半径，$L$是轴距
+
+#### Lattice Graph
+**Lattice Graph**是一种基于网格的图搜索构建方法，它将机器人的运动空间划分为一个网格，每个网格节点代表一个可能的状态，通过连接相邻节点来构建图结构。它的原理和PRM一样，都是先给出所有状态节点，再检查点的合法性和可连接性（可以使用启发式代价限制扩展的状态节点的个数和倾向，扩展方式也可以使用采样的方式），连接的线使用如**Boundary Value Problem, BVP**求解器的东西来求解高阶多项式曲线，使用系数储存它们
+该图的构建方式既可以离散化控制空间也可以离散化状态空间构建，对于差速驱动模型，我们还可以使用**Reeds Shepp**曲线来连接两个状态节点，该曲线基于差速驱动模型通过数学解析式严谨推出，不会出现让小车卡住，无法运动到的曲线，它仅由圆弧、直线拼接而成
+
+#### 最优边界值问题 Optimal Boundary Value Problem, OBVP
+**最优边界值问题 - Optimal Boundary Value Problem, OBVP**是一种求解高阶多项式曲线的方法，它通过求解边界条件下的最优解来确定曲线的形状。在Lattice Graph中，我们使用OBVP来求解连接两个状态节点的曲线，在这里我们的优化目标就是最小化$\text{Jerk}$平方的积分$J_\Sigma = \sum_{k=1}^3 J_k$，其中$J_k = \cfrac{1}{T} \int_0^T j_k(t)^2 dt$，系统状态为$s_k = (p_k, v_k, a_k)$，控制量为$u_k = j_k$，系统模型为$\dot{s}_k = f_s(s_k, u_k) = (v_k, a_k, j_k)$，我们构建目标代价函数$J = h[s(T)] + \int_0^T g[s(t), u(t)]dt$，目标就是最小化它，求接触**最优状态**和**最优输入**
+
+##### 求解方法
+引入协态变量$\lambda = [\lambda_1, \lambda_2, \lambda_3]^T$，其中$\lambda_1, \lambda_2, \lambda_3$分别为$p_k, v_k, a_k$的协态变量，它通常用于指示哪一个维度的改变更有价值（对总体代价影响更大），如果我们将即时代价$L(s, u, t)$与未来代价的投影$\lambda ^T(t)f(s, u, t)$相加，得到的就是**汉密尔顿函数 - Hamiltonian Function**$H(\lambda, s, u, t) = L(s, u, t) + \lambda^T(t)f(s, u, t)$
+我们列出状态方程（$H$对$\lambda$的偏导数）：
+$$
+\dot{s} = \cfrac{\partial H}{\partial \lambda} = f(s, u, t)
+$$
+列出协态方程（$H$对$s$的偏导数）：
+$$
+\dot{\lambda} = -\cfrac{\partial H}{\partial s} = -\cfrac{\partial L}{\partial s} - \cfrac{\partial f}{\partial s}^T\lambda = -\nabla_s H(s^*(t), u^*(t), \lambda (t))
+$$
+这两条方程组成**哈密顿方程**
+如果有惩罚项代价（惩罚最后是否达到终点，即没有固定末状态的情况下，如果惩罚函数是到达终点为0，否则为$\infty$，那么这是硬约束，必须要求$s_f = s(T)$，该情况下不能用这个边界条件），则需要加上一个边界条件$\lambda (T) = \nabla_x h[s^*(T)]$
+我们加上**庞特利亚金极小值原理 - Pontryagin's Minimum Principle**：
+$$
+u^*(t) = \arg\min_{j(t)} H[s^*(t), u(t), \lambda (t)]
+$$
+如果$u$没有约束，且最优解在内部，则有一阶必要条件$\cfrac{\partial H}{\partial u} = 0$，即$\cfrac{\partial L}{\partial u} + (\cfrac{\partial f}{\partial u})^T\lambda = 0$
+该方程能解得最优输入$u^*(t) = g(s^*(t), \lambda (t))$，将该解带入$\dot{s} = f(s, u, t)$与$\dot{\lambda} = -\cfrac{\partial L}{\partial s} - (\cfrac{\partial f}{\partial s})^T\lambda$，得到只含$s,\lambda$的一阶微分方程组：
+$$
+\begin{cases}
+\dot{s} = f(s, g(s, \lambda, t), t)\\
+\dot{\lambda} = -\nabla_s H(s^*(t), g(s, \lambda, t), \lambda (t))
+\end{cases}
+$$
+在给定初状态$s_0$和末状态$s_f$
+（分别带入$t=0,t=T$，但是如果末状态不是固定的$s_f$，那么就需要用到惩罚项给出的式子）的情况下，我们能知道$[p_0, v_0, a_0]^T, [p_f, v_f, a_f]^T, [\Delta p, \Delta v, \Delta a]^T$，随后我们就能把s^*(t)转化为只与$T$有关的式子
+顺带我们中途能求出总代价$J$的式子，它也只与$T$有关（最后可能是一个多项式函数），所以最后问题变成了函数求极值问题
