@@ -3711,10 +3711,10 @@ $$P(t) = \cfrac{1}{6}\begin{bmatrix}
     P_3
 \end{bmatrix}$$
 所以对于任意四个控制点$P_i,P_{i+1},P_{i+2},P_{i+3}$，我们可以写成如下形式：
-$$P(t) = \boldsymbol{TMP}_i,t\in[0, 1]
-$$其中$\boldsymbol{M}$为$\cfrac{1}{6}$乘中间的基矩阵，我们平滑的目标是设计目标代价函数：
-$$J_{smooth} = \int^1_0||P''(t)||^2dt
-$$并使其最小，将轨迹函数的二阶导展开带入积分后得到：
+$$P(t) = \boldsymbol{TMP}_i,t\in[0, 1]$$
+其中$\boldsymbol{M}$为$\cfrac{1}{6}$乘中间的基矩阵，我们平滑的目标是设计目标代价函数：
+$$J_{smooth} = \int^1_0||P''(t)||^2dt$$
+并使其最小，将轨迹函数的二阶导展开带入积分后得到：
 $$J_{smooth} = \boldsymbol{P}_i^T \boldsymbol{M}^T \left( \int_{0}^{1} \boldsymbol{T}''^T \boldsymbol{T}'' dt \right) \boldsymbol{M} \boldsymbol{P}_i$$
 中间的积分项实际上是一个常数矩阵$\boldsymbol{N} = \begin{bmatrix}
     12 & 6 & 0 & 0 \\
@@ -3734,7 +3734,7 @@ const double Q_data[4][4] = {
 $$J_{guide} = \sum_{i=1}^n (P_i - P_{ref,i})^2 = \boldsymbol{P}^T \boldsymbol{I} \boldsymbol{P} - 2 \boldsymbol{P}_{ref}^T \boldsymbol{P} + \text{const}$$
 随后我们将两个代价函数合并，并使用平滑权重系数和引导权重系数组成一个最终代价：
 $$J_{total} = w_s\sum J_{smooth} + w_g J_{guide}$$
-它可以写成一个qp问题的形式：
+它可以写成一个qp问题（QP问题是典型的凸优化问题，在目前形势下，是一定有解的）的形式：
 $$J_{total} = \frac{1}{2} \boldsymbol{P}^T \underbrace{(w_s \boldsymbol{H}_{smooth} + w_g \boldsymbol{I})}_{\text{二次项矩阵 } \boldsymbol{H}_{QP}} \boldsymbol{P} + \underbrace{(-w_g \boldsymbol{P}_{ref})^T}_{\text{一次项向量 } \boldsymbol{f}_{QP}^T} \boldsymbol{P}$$
 其中$\boldsymbol{H}_{smooth}$为所有$4\times 4$的$\boldsymbol{Q}$进行对角线上叠加得到（不是分块放置，而是对角线上放下一个矩阵，下一格对角线再放一个，此时矩阵之间的重叠部分叠加）
 同时我们需要设立一组约束，即对于平滑后的点，若为起点或终点，必须与平滑前相同，否则设立上下边界$u,l$，保证$\boldsymbol{A} = \boldsymbol{I}$下有$l \leq \boldsymbol{AP} \leq u$
