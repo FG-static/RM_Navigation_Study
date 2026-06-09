@@ -503,3 +503,179 @@ $$J_s = \sum_{i} \|\mathbf{P}_{i-1} - 2\mathbf{P}_i + \mathbf{P}_{i+1}\|^2$$
 ##### 现象 B：走廊约束对时间分配的免役（隐式时间调整）
 
 * **走廊的交叉重叠区域（Overlap Region）** 提供了极大的几何容错。由于交界节点变量在重叠盒子里是可以自由漂移的，优化器在时间分配不理想时，可以通过自发挪动重叠区节点的位置，在空间上“延长”或“缩短”实际的物理位移，从而**隐式地对冲掉不合理的时间分配**，显著降低了算法对外界时间分配器的依赖。
+
+## 基于 MDP 的路径规划
+### 规划中的不确定性
+#### 不确定性的规范
+为了方便规划，我们假设传统机器人的所有动作都完美执行，例如网格移动精确到位（现实会存在打滑、地形不平等因素）。
+在状态估计时，估计的值会受各方面因素的影响而变得不确定，例如：
+- 感知局限：传感器噪声、标定误差、部分可观测性等
+- 状态认知：无法精确获知环境状态
+- 复合影响：执行与感知不确定性常同时存在
+
+#### 不确定性分类
+不确定性一般分为两种：
+- $\text{Nondeterministic}$：完全无法预测干扰程度
+- $\text{Probabilistic}$：可通过经验估计干扰概率分布
+
+我们可以引入$\text{Nature}$角色模拟所有不确定性来源，规划结果变为Robot与Nature的博弈，也就是单步决策时，需要同时考虑两者的双重影响
+
+#### 在不确定性中规划
+##### 对抗自然
+我们建立**独立博弈模型**，假设机器人动作空间$U$和自然动作空间$\Theta$相互独立，通过成本函数$L(U, \Theta): U \times \Theta \rightarrow \mathbb{R} \cup \{\infty\}$衡量交互结果
+
+##### 自然知道机器人动作的不确定性规划 - Planning with Uncertainties
+机器人动作空间$U$与自然动作空间$\Theta$存在条件依赖关系，对于每一个$u \in U$都称为机器人动作空间的一个动作，$\Theta(u)$称为自然空间的动作，同样使用成本函数$L$衡量交互结果，即在自然参与的情况下为机器人寻找最优路径、计划或决策
+
+##### One-step Wrost-Case Analysis方法
+该情况下，自然永远对机器人施加最坏的动作，机器人无法预测自然的行为，那么我们要求得最优的动作就是：
+$$
+u^* = \arg\min_{u \in U} \{ \max_{\theta \in \Theta} \{ L(u, \theta) \} \}
+$$
+
+##### One-step Expected-Case Analysis方法
+概率模型下，自然行为已知服从某种分布，$P(\theta)$表示自然动作$\theta$的先验概率分布，而$P(\theta | u_k)$表示机器人在采取$u_k$下，自然动作$\theta $发生的概率，所以我们只需优化期望即可：
+$$
+u^* = \arg\min_{u \in U} \{ E_{\theta} [ L(u, \theta) ] \}
+$$
+期望的概率按需取 $ P(\theta) $ 和 $ P(\theta | u_k) $
+
+##### 正式规划不确定性
+设非状态空间$X$和初始状态$x_s$，目标集$X_F \subset X$，例如：
+- $X = {s_s, s_1, s_2, s_3, s_4, s_g}$
+- $X_F = {s_g}$
+- $U = {u_s, u_1, u_{21}, u_{24}, u_3, u_4}$
+- $\Theta = {\theta_0, \theta_1, \theta_2}$
+
+例如，假设从$s_1$状态出发，动作是$u_1$，但是nature可能有两种动作$\theta_1, \theta_2$，导致状态转移函数$f(s, u, \theta)$出现：
+$$
+f(s_1, u_1, \theta_1) = s_g \\
+f(s_1, u_1, \theta_2) = s_2
+$$
+如果定义一步代价函数$l: X \times U \times \Theta \rightarrow \mathbb{R},l(x, u, \theta)$表示在状态 $x$ 下，机器人选择动作 $u$，nature 选择动作 $\theta$，这一瞬间产生的代价，即$l(s_1, u_1, \theta_1) = l(s_1, u_1, \theta_2)$
+我们定义
+$$
+X_{k+1} (x_k, u_k) = \{ x_{k+1} \in X | \exist \theta_k \in \Theta(x_k, u_k) \text{s.t. }x_{k+1} = f(x_k, u_k, \theta_k) \}
+$$
+所以我们就有
+$$
+P(x_{k+1}|x_k, u_k) = \sum_{\theta_k}P(x_{k+1}, \theta | x_k, u_k) \text{s.t.} \{ \theta_k | x_{k+1} = f(x_k, u_k, \theta_k) \}
+$$
+例如刚刚的例子，我们可以得到$X(s_1, u_1) = \{ f(s_1, u_1, \theta_1), f(s_1, u_1, \theta_2) \}$
+由于我们是多步规划，不再是单步规划，所以我们规定规划的机器人运动步数$F = K + 1$，其中$K$是自然作用的步数，以$k = 1$作为实时规划步开始，$k = K + 1$结束
+对于代价函数，我们先定义$\tilde{x}_F = (x_1, x_2, \cdots, x_F)$，类似定义$\tilde{u}_k, \tilde{\theta}_K$，所以代价函数就是：
+$$
+L(\tilde{x}_F, \tilde{u}_K, \tilde{\theta}_K) = \sum^K_{k = 1} l(x_k, u_k, \theta_k) + l_F(x_F) \\
+l_F(x_F) = \begin{cases}
+    0, \text{if }x_F \in X_G , \\
+    \infty, \text{otherwise.}
+\end{cases}
+$$
+
+##### 马尔科夫决策过程 - \text{Markov Decision Process, MDP}
+**马尔科夫决策过程**是一个四元组，在强化学习领域表示为$(S, A, P, R)$，在规划领域表示为$(X, U, P, L)$，这里特别说明一下，MDP中的$R(x_k, x_{k+1})$是即时奖励，也可以看成$-l(x_k, u_k, \theta_k)$，例如在格子中决策：
+![alt text](Image//image-26.png)
+定义一个**策略**为从状态空间到动作空间的映射$\pi:X\rightarrow U$，表示在状态$x$下应该选择动作$\pi(x) = u$，但是由于nature动作的原因，它通常不是一个值，严格来说他是$\pi(x) \in U(x)$，因为解都不是固定的确定性路径，其展开后是一棵决策树。由此引出$\mathcal{H}(\pi, x_s)$表示从初始状态$x_s$​出发，按照策略$\pi$执行时，所有可能出现的轨迹集合，所以同一个策略可能产生多条轨迹，例如一条轨迹可以写成：
+$$
+(\tilde{x}, \tilde{u}, \tilde{\theta}) \in \mathcal{H}(\pi, x_s)
+$$
+它们满足：
+$$
+x_0 = x_s \\
+u_k = \pi(x_k) \\
+\theta_k \in \Theta(x_k ,u_k) \\
+x_{k + 1} = f(x_k, u_k, \theta_k)
+$$
+![alt text](Image//image-27.png)
+我们再定义$G_\pi(x_s) = \max_{(\tilde{x}, \tilde{u}, \tilde(\theta)) \in \mathcal{H}(\pi, x_s)} \{ L(\tilde{x}, \tilde{u}, \tilde{\theta}) \}$，这是非确定模型的$\text{cost-to-goal}$函数，即从初始状态$x_s$出发，按照策略$\pi$执行到达终点的总体性能表现，如果是概率模型则需改为$G_\pi(x_s) = E_{\mathcal{H}(\pi, x_s)}[L(\tilde{x}, \tilde{u}, \tilde{\theta})]$
+我们记$\pi^*$为最优策略，那么：
+$$
+G_{\pi^*}(x_s) = \min_\pi\{G_\pi (x_s)\} = \min_\pi\{\max_{\mathcal{H}(\pi, x_s)} \{ L(\tilde{x}, \tilde{u}, \tilde{\theta}) \}\}
+$$
+##### 动态规划求解方法
+我们要求接这个**最小代价规划 - Minimax Cost Planning**问题，可以引入动态规划方法。记$G^*_k(x_k)$表示从第k阶段的状态x_k出发，到达目标的最优代价，记最优终止状态成本$G^*_F = l_F(x_F)$，我们给定目标状态$s_g$，以及不是目标的终端状态$x$，则$G^*(s_g) = 0,G^*(x) = +\infty$
+对于非确定模型，其单步递推模型就是：
+$$
+G^*_K(x_K) = \min_{u_k}\max_{\theta_k} \{ l(x_K, u_K, \theta_K) + G^*_F(f(x_K, u_K, \theta_K)) \}
+$$
+其中$F = K + 1$，类似地，我们就能推导出第$k$到第$k + 1$步的递推模型公式（也就是**贝尔曼最优方程 - Bellman Update Equation**）：
+![alt text](Image//image-28.png)
+以下是基于Dijkstra算法的Minimax Cost Planning非确定性模型的伪代码：
+
+---
+
+$G(x_F) \leftarrow 0; \text{ all other } G \text{ values are infinite}; \text{ OPEN } = \{x_F\}; \text{ CLOSED } = \varnothing;$
+**while** $x_S \text{ is not expanded}$ **do**
+$\quad x_{k+1} \leftarrow \text{remove } x \text{ with the smallest } G \text{ value from OPEN};$
+$\quad \text{insert } x_{k+1} \text{ to CLOSED};$
+$\quad$ **for** $\text{every } x_k \notin \text{CLOSED s.t. } x_{k+1} \in X_{k+1}(x_k, u_k)$ **do**
+$\quad\quad \textbf{if } G(x_k) > \max_{\theta_k \in \Theta(x_k, u_k)} \{ l(x_k, u_k, \theta_k) + G(x_{k+1}) \} \textbf{ then}$
+$\quad\quad\quad G(x_k) = \max_{\theta_k \in \Theta(x_k, u_k)} \{ l(x_k, u_k, \theta_k) + G(x_{k+1}) \};$
+$\quad\quad\quad \text{insert } x_k \text{ into OPEN};$
+$\quad\quad$ **end**
+$\quad$ **end**
+**end**
+
+---
+
+初始状态下$G(s_g) = 0$，其他$G(s) = \infty$，$\text{OPEN} = \{ s_g \}, \text{CLOSED} = \varnothing$，正如上面的伪代码和公式所展示的，这个算法实际上是倒推版本的Dijkstra算法，这是由$G$函数的定义得到的最优递推公式导致的。
+该算法的优点很明显，就是对最坏情况的不确定性的鲁棒性很强，缺点就是太过悲观，每次都只考虑最坏情况，容易导致效率过低，除此之外：
+- 相比传统路径规划，其求解是直接求解决策树而非固定路径，更为复杂
+- 非确定性下Dijkstra算法和AStar算法都不适用，就算AStar算法适用，其计算成本也远高于单一路径的AStar算法
+  
+对于概率模型，我们不再是minimax，而是**Expected-Case**，有：
+$$
+G_{\pi^*}(x_s) = \min_\pi \{ G_\pi(x_s) \} = \min_\pi \{ E_{\mathcal{H}(\pi, x_s)} [ L(\tilde{x}, \tilde{u}, \tilde{\theta}) ] \}
+$$
+依然可以得到单步递推模型：
+$$
+G^*_K(x_K) = \min_{u_k} \{ E_{\theta_k} [ l(x_K, u_K, \theta_K) + G^*_F(f(x_K, u_K, \theta_K)) ] \}
+$$
+得到$k \rightarrow k + 1$的公式：
+![alt text](Image//image-29.png)
+
+以下是基于迭代动态规划算法的Expected-Case概率模型的伪代码：
+
+---
+
+$
+\begin{aligned}
+&\textbf{Initialize } G \textbf{ values of all states to finite values;}\\[4pt]
+&\textbf{while not converge do}\\
+&\quad \textbf{for all the states } x \textbf{ do}\\[4pt]
+&\quad\quad G(x_F) \leftarrow 0\\[6pt]
+&\quad\quad 
+G_k(x_k)
+\leftarrow
+\min_{u_k \in U(x_k)}
+\left\{
+\mathbb{E}_{\theta_k}
+\left[
+l(x_k,u_k,\theta_k)
++
+G_{k+1}(x_{k+1})
+\right]
+\right\},
+\qquad x_k \neq x_F\\[4pt]
+&\quad \textbf{end}\\
+&\textbf{end}
+\end{aligned}
+$
+
+---
+
+也就是初始化所有$G$值为极小值（例如0之类的），然后每步都令$G(x_F)$为0，然后不断使用贝尔曼方程进行迭代优化，直到收敛。
+该算法的优点是：
+- 平均意义最优
+
+缺点是：
+- 小概率事件仍可能发生，大概率事件也不一定会发生
+- 需要明确定义$\theta_k$的分布来建模，也需要定义nature和action space及其依赖关系
+- 计算困难，需要全局计算
+- 对初始值和迭代次序很敏感，效率会有所变动
+
+需要注意的是，无条件约束的情况下不一定能收敛，例如：
+- 递推式的折扣代价为$\gamma$1（就是现在的递推方程），如果$0 < \gamma < 1$，则可以保证收敛，否则无法保证
+- 带环的情况下，正代价环、零代价环、负代价环均无法保证收敛，因为环会使得状态间相互依赖
+
+同样的，对于确定性模型，它的收敛条件也是使用反向Dijkstra算法以及不能出现负边和负环
