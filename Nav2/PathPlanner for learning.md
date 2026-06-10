@@ -106,6 +106,7 @@ $$
 ### 运动学模型
 我们一般使用$s$表示机器人状态，即$\dot{s} = f(s, u)$，其中$s$是状态向量，$u$是控制输入向量
 - 独轮车模型：
+  
   $$
   \begin{bmatrix}
     \dot{x} \\
@@ -121,6 +122,7 @@ $$
   $$
   其中$v$是速度，$\omega$是角速度
 - 差速驱动模型：
+  
   $$
   \begin{bmatrix}
     \dot{x} \\
@@ -672,10 +674,72 @@ $
 - 小概率事件仍可能发生，大概率事件也不一定会发生
 - 需要明确定义$\theta_k$的分布来建模，也需要定义nature和action space及其依赖关系
 - 计算困难，需要全局计算
-- 对初始值和迭代次序很敏感，效率会有所变动
+- 对初始值（也就是每一轮的迭代顺序，如果按固定顺序，先更新后继再更新前继，收敛会更快；如果是动态的，可以按照$G$值变化大的状态或$G(x)$小的状态更新）和迭代次序很敏感，效率会有所变动
 
 需要注意的是，无条件约束的情况下不一定能收敛，例如：
 - 递推式的折扣代价为$\gamma$1（就是现在的递推方程），如果$0 < \gamma < 1$，则可以保证收敛，否则无法保证
 - 带环的情况下，正代价环、零代价环、负代价环均无法保证收敛，因为环会使得状态间相互依赖
 
 同样的，对于确定性模型，它的收敛条件也是使用反向Dijkstra算法以及不能出现负边和负环
+
+##### Real Time Dynamic Programming, RTDP
+在上述概率模型的算法（即$\text{Value Iteration}$方法）中，为了改进某些缺陷，故而提出了$\text{Real Time Dynamic Programming, RTDP}$算法。它与前者不同的地方有：
+- 迭代总数不再是全部状态，而是从初始状态开始
+- 初始迭代顺序自动生成，而不是固定顺序，它会按照这个迭代顺序进行每一次迭代，通常有如下几种生成方式：
+  - 部份贪心：
+    在每一步都选$u^* = \arg\min_u Q(x, u)$的情况下，增加一个极小概率$\sigma$，表示大多数情况下以$1 - \sigma$的概率选择最优动作，$\sigma$的概率随机选择动作
+  - 启发式贪心：
+    在初始化$G(x)$时，使用一个启发式函数赋予初始代价，然后RTDP按当前的$G$用贪心生成轨迹，如果启发式函数$h(x)$是admissible（$h(x) \geq G^*(x)$）的，那么RTDP通常会以乐观估计开始
+- 迭代过程中还会边规划边给出当前最优策略作为$\text{anytime}$方法，如果到最后都没有收敛，那么也可以中断RTDP直接执行最优策略
+
+这是RTDP算法基于概率模型的伪代码：
+
+---
+
+$$
+\begin{array}{l}
+\textbf{Initialize } G(x)\leftarrow h(x),\quad \forall x\in X \\[2pt]
+G(x_F)\leftarrow 0 \\[6pt]
+
+\textbf{repeat} \\[2pt]
+\quad x\leftarrow x_s \\[4pt]
+
+\quad \textbf{while } x\neq x_F \textbf{ do} \\[4pt]
+
+\quad\quad
+G(x)\leftarrow
+\displaystyle
+\min_{u\in U(x)}
+\left\{
+\mathbb{E}_{\theta}
+\left[
+l(x,u,\theta)+G(f(x,u,\theta))
+\right]
+\right\}
+\\[10pt]
+
+\quad\quad
+u^*\leftarrow
+\displaystyle
+\arg\min_{u\in U(x)}
+\left\{
+\mathbb{E}_{\theta}
+\left[
+l(x,u,\theta)+G(f(x,u,\theta))
+\right]
+\right\}
+\\[10pt]
+
+\quad\quad
+\theta\sim P(\theta\mid x,u^*) \\[4pt]
+
+\quad\quad
+x\leftarrow f(x,u^*,\theta) \\[4pt]
+
+\quad \textbf{end while} \\[4pt]
+
+\textbf{until convergence}
+\end{array}
+$$
+
+---
