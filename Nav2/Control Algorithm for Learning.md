@@ -213,6 +213,15 @@ $$
 
 - **边界约束运动基元 Boundary Constrained Motion Primitives, BSCP**
   我们可以直接给出初始状态和期望达到的理想状态，根据实际情况求解一个BVP/OBVP问题得到输入，然后模拟一段轨迹，它的整个流程类似于基于运动学的路径规划方法。
+  另一方面，如果想规避BVP/OBVP的求解，可以使用$\text{General BSCP}$方法，即我们不直接去优化轨迹，而是使用一个求解器$\mathcal{S}$来生成轨迹。对于初始状态$\boldsymbol{x_0}$与终端参数$\boldsymbol{\theta}$，假设有一个求解器$\mathcal{S}$可以做到：
+  $$
+  \mathcal{S}: \langle \boldsymbol{x_0}, \boldsymbol{\theta} \rangle \rightarrow \langle \hat{\boldsymbol{u}}(t), \hat{\boldsymbol{x}}(t), \hat{t}_f \rangle
+  $$
+  那么我们只需要优化参数$\boldsymbol{\theta}$就可以求得最优轨迹了，所以需要优化的目标就变成了：
+  $$
+  \min_\theta L_F(\theta) + \int^{t_f}_{t = t_0} L_R(\theta)dt
+  $$
+  随后使用PSO等无需梯度信息的方法进行求解即可。
 
 - **加加速度受限轨迹 Jerk limited trajectory**
   也就是限制的约束为$p,v,a,j$，分别设立这四个量的约束，生成一个轨迹，本质上可以看作一个OBVP问题，但一般会利用解的特殊性去求解它，而不是用一般的OBVP求解方法或求解器（$\text{Time Optimal Control, TOC}$方法就是它的二阶模型情况），它也类似于基于运动学的路径规划方法。
@@ -266,6 +275,68 @@ $$
 硬约束就是全局满足一个不等式，软约束就是将惩罚加入到代价函数一起优化，我们一般选择的策略是：
 - 涉及状态约束的使用软约束，这是因为其受到测量噪声干扰影响
 - 涉及输入约束的使用硬约束，避免对物理系统造成损害
+
+##### General BSCP 优化
+如果不用PSO方法，还有另一种方法**神经网络 - NN**可以作为替代的优化方案。即给定大量已经通过BVP/OBVP求解器对初始状态和终端参数求解出的最优轨迹作为数据集来训练神经网络，采用神经网络那么就会有两种做法：
+- NN生成初值$\theta$，然后使用BVP/OBVP求解器进行精修，寻找最优轨迹
+  优点：结果精确最优
+  缺点：占用比较大
+- NN生成初值$\theta$，随后通过反向传播求得代价函数$J$关于参数$\theta$的导数，然后使用梯度下降法不断优化得到最优$\theta^*$来生成轨迹
+  优点：占用不大，简单好写
+  缺点：结果并不一定最优
+
+第二种方法还可以给代价函数加上各种软约束/硬约束求得更符合条件的轨迹，以下是反向传播计算梯度的伪代码：
+
+---
+
+$$
+\begin{array}{l}
+\textbf{Given: } x_0,\ S_\phi,\ \theta^0,\ \alpha,\ R \\[2pt]
+\textbf{Freeze network parameters } \phi \\[6pt]
+
+\textbf{for } r=0,1,\dots,R-1 \textbf{ do} \\[4pt]
+
+\quad
+\{x_k,u_k,t_f\}
+\leftarrow
+S_\phi(x_0,\theta^r)
+\\[6pt]
+
+\quad
+J(\theta^r)
+\leftarrow
+C_F(x_N,\theta^r)
++
+\dfrac{t_f}{N}
+\displaystyle\sum_{k=0}^{N-1}
+C_R(x_k,u_k)
+\\[10pt]
+
+\quad
+g^r
+\leftarrow
+\nabla_{\theta}J(\theta^r)
+\\[6pt]
+
+\quad
+\theta^{r+1}
+\leftarrow
+\theta^r-\alpha g^r
+\\[6pt]
+
+\quad
+\theta^{r+1}
+\leftarrow
+\Pi_{\Theta}(\theta^{r+1})
+\\[4pt]
+
+\textbf{end for}
+\end{array}
+$$
+
+---
+
+注意，这里不要直接算$\cfrac{\partial y}{\partial \theta}$，否则出来的雅可比矩阵可能会很大，难以计算，可以直接算$\nabla_yJ\cfrac{\partial y}{\partial \theta}$，这个是**向量-雅可比积 - VJP**，效率更高，计算方法如果用`PyTorch`的话可以直接调用反向传播函数进行计算VJP，也可以自行保存每一步的导数，到最后反向传播时乘一起手写反向传播。
 
 ### 建图
 首先对地图进行二值化，然后建立一个$\text{Euclidean Distance Transform, EDT}$图，途中离障碍物越近（欧氏距离）的颜色越深，否则越浅，最后基于EDT构建代价地图，包含三部分区域：
