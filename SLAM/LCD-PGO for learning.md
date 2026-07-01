@@ -81,17 +81,32 @@ LiDAR Iris的做法是：
 
 最终，所有bin的像素值组成一张 $80 \times 360$ 的灰度图，这就是**LiDAR-Iris图像**。之所以叫"Iris"（虹膜），是因为从上往下看LiDAR点云的形状，和人眼睛的虹膜非常相似——都是同心圆结构。
 
-#### 第二步：Fourier变换实现平移不变性
+这里借鉴了Daugman虹膜识别中的**Rubber Sheet Model**思想：把圆形的虹膜区域展开为一条矩形图像条（将极坐标 $(r, \theta)$ 映射为矩形图像的行列坐标）。LiDAR Iris同样将鸟瞰视角的点云"展开"为一条 $80 \times 360$ 的图像条，每个像素的强度就是该bin的8位二进制码对应的十进制值。
+
+这种编码方式相比传统的基于直方图的全局描述子（如ESF、M2DP等）有两个显著优势：
+1. **不需要逐点计数**：直方图类方法需要统计每个bin内有多少个点，而LiDAR-Iris只关心每个子bin"有没有点"（0或1），计算更高效
+2. **无需预训练**：编码规则是固定的手工设计，不需要像PointNetVLAD等深度学习方法那样依赖大量训练数据，泛化性更好
+
+需要注意的是，到这一步得到的描述子**尚未具有旋转/yaw不变性**——同一位置不同朝向采集的两帧，生成的LiDAR-Iris图像会有水平方向的角向循环偏移。下面将通过Fourier变换和循环匹配降低这个影响。真实世界的横向/纵向平移不能简单等价为这种循环偏移。
+
+#### 第二步：Fourier变换、循环位移与旋转不变性
 
 **问题是什么？**
 
-想象一辆车在同一个十字路口经过两次，但第二次是反方向驶来的。由于车的朝向不同，对应的LiDAR-Iris图像会在水平方向上发生**循环平移**（cyclic translation）——就像一张照片被水平滚动了一段距离。
+机器人在实际运行中，两次经过同一地点时，朝向不可能完全一致。朝向差异会影响LiDAR-Iris图像的匹配。
 
-**为什么Fourier变换能解决？**
+具体来说，在LiDAR-Iris图像中：
+- **旋转（heading变化）**：机器人绕自身z轴旋转一个角度 $\Delta\theta$，相当于所有点的方位角都偏移了 $\Delta\theta$。由于LiDAR-Iris图像的水平轴就是方位角（0°~360°离散为360个bin），所以旋转直接表现为图像在**水平方向上的循环平移**。比如机器人右转了30°，整张图像就往右滚动了30个bin。
 
-这是信号处理中的经典结论：**时域（空间域）中的平移，在频域中只表现为相位的变化，而幅度谱不变**。
+这个运动在LiDAR-Iris图像上体现为**角向循环平移（cyclic shift）**。我们需要一种方法，让匹配不受这种滚动的影响。
 
-具体来说，设两幅LiDAR-Iris图像为 $I_1$ 和 $I_2$，它们之间存在平移 $(\delta_x, \delta_y)$，即 $I_1(x, y) = I_2(x - \delta_x, y - \delta_y)$。
+需要特别注意：**真实的$x/y$平移不等价于LiDAR-Iris图像上的简单循环平移**。LiDAR-Iris图像是以当前LiDAR为中心构造的极坐标描述子，机器人横向或纵向移动后，周围几何在极坐标下会发生非线性重投影和局部形变，而不是像yaw变化那样形成一个干净的水平循环shift。因此，LiDAR-Iris/Scan Context类方法更擅长估计和补偿yaw偏差，不应该把它理解为能可靠估计平面位移偏差。
+
+**为什么Fourier变换能解决角向循环偏移？**
+
+这是信号处理中的经典结论：**图像坐标中的平移，在频域中主要表现为相位变化，而幅度谱不变**。
+
+具体来说，设两幅LiDAR-Iris图像为 $I_1$ 和 $I_2$，如果它们之间存在图像坐标意义上的平移 $(\delta_x, \delta_y)$，即 $I_1(x, y) = I_2(x - \delta_x, y - \delta_y)$。
 
 对两者分别做2D Fourier变换，得到 $\hat{I}_1$ 和 $\hat{I}_2$，它们满足：
 $$
@@ -109,31 +124,51 @@ Corr(x, y) = F^{-1}(Corr) = \delta(x - \delta_x, y - \delta_y)
 $$
 
 结果是一个脉冲函数，只在 $(\delta_x, \delta_y)$ 处非零。这意味着：
-- 我们可以精确地估计出两幅图像之间的平移量
-- 更重要的是，**Fourier变换的幅度谱天然具有平移不变性**，所以可以直接用幅度谱来比较两帧点云的相似性，而不需要知道它们之间的朝向差异
+- 对于LiDAR-Iris这种角向展开图，yaw变化对应的水平循环偏移可以通过类似相位相关/循环匹配的思想估计出来；
+- Fourier变换的幅度谱对图像坐标上的循环平移具有不变性，所以可以降低朝向差异对描述子匹配的影响。
 
-**通俗理解**：就像你把一首歌在播放器里往后拖了几秒再听，虽然"波形"变了，但"频谱"（频率成分）是不变的。LiDAR Iris利用的就是这个原理——虽然不同朝向导致图像平移了，但频谱的"指纹"是一样的。
+**通俗理解**：就像你把一首歌在播放器里往后拖了几秒再听，虽然"波形"变了，但"频谱"（频率成分）是不变的。LiDAR Iris利用的就是这个原理来减弱角向循环偏移的影响。它并不保证能区分或估计真实世界中的横向/纵向平移，尤其在长廊、隧道、重复墙面这类结构里，两个物理位置不同但局部几何相似的扫描仍可能得到很近的描述子距离。
 
 #### 第三步：LoG-Gabor滤波提取二值特征
 
 **为什么需要滤波？**
 
-Fourier变换后的幅度谱虽然具有平移不变性，但直接用它做匹配效果不够好。我们需要进一步提取更有判别性的特征。
+Fourier变换后的幅度谱虽然对图像坐标里的循环位移更鲁棒，但直接用它做匹配效果不够好——LiDAR-Iris图像本身存在点密度变化、传感器噪声、小范围视角变化导致的强度波动等问题，直接比较像素值不够稳定。我们需要一层特征提取，把关注点从"这个像素值是多少"转移到"这个区域有没有某种结构变化"。
 
-**LoG-Gabor滤波器是什么？**
+**前置知识：Gabor滤波器**
 
-LoG-Gabor是Log-Gabor滤波器的简称，它是Gabor滤波器的改进版。Gabor滤波器在图像处理中常用于提取特定频率和方向的纹理特征，就像一个"频率放大镜"。
+Gabor滤波器可以理解为**高斯窗口 × 正弦波**：
+$$
+g(x, y) = \text{Gaussian}(x, y) \times \cos/\sin(\text{某个方向、某个频率})
+$$
 
-LoG-Gabor相比普通Gabor的优势：它的频率响应在对数域上是对称的高斯分布，**没有直流分量（DC component）**，因此对自然图像的分析效果更好。
+其中高斯窗口就是二维高斯函数 $\text{Gaussian}(x, y) = e^{-(x^2 + y^2)/(2\sigma^2)}$，它的作用是给正弦波加一个"衰减罩"——中心处权重最大，越往边缘权重越小，最终平滑地衰减到零。这样做的目的是让滤波器**只关注局部区域**：正弦波负责提取特定频率和方向的纹理，高斯窗口负责把这个提取能力限制在局部范围内，避免远处无关的纹理干扰。没有高斯窗口的话，正弦波在整个图像上都有响应，就失去了"局部性"。
 
-一维LoG-Gabor滤波器的频率响应为：
+它对图像中**特定方向、特定频率**的纹理/边缘结构敏感。比如一条竖直边缘会让某个方向的Gabor滤波器产生强响应，而横向纹理则让另一个方向的滤波器响应强。因此Gabor滤波器广泛用于虹膜识别、指纹识别、纹理分析等场景——LiDAR Iris名字里的"Iris"正是借鉴了虹膜识别的思路。
+
+**注意命名混淆**：LoG-Gabor ≠ LoG（Laplacian of Gaussian）。LoG是拉普拉斯高斯，用于边缘检测；本文的LoG-Gabor是**Log-Gabor**，即对数域的Gabor滤波器，两者完全不同。
+
+**Log-Gabor vs 普通Gabor**
+
+普通Gabor滤波器在**线性频率轴**上定义高斯形状，而Log-Gabor改为在**对数频率轴**上定义：
 $$
 G(f) = \exp\left(\frac{-(\log(f/f_0))^2}{2(\log(\sigma/f_0))^2}\right)
 $$
-其中 $f_0$ 是中心频率（决定滤波器"看"哪个频率段），$\sigma$ 控制带宽（决定"看"多宽的频率范围）。参数 $\sigma/f_0$ 需要保持恒定，以维持滤波器形状的一致性。
+其中 $f_0$ 是中心频率，$\sigma$ 控制带宽，$\sigma/f_0$ 需保持恒定。
+
+这样做的核心好处是**没有直流分量（DC component）**——普通Gabor在零频附近有响应，会对图像整体亮度/低频偏置敏感；Log-Gabor把这个"盲区"去掉了，对强度偏移更鲁棒。对于LiDAR-Iris这种点密度和强度会随帧变化的图像来说，这一点很关键。
+
+**为什么Log-Gabor适合LiDAR-Iris？**
+
+LiDAR-Iris图像直接比较有几个问题：
+- 点云密度会变化（同一位置不同时间，点数不同）
+- 传感器噪声导致局部像素值波动
+- 小范围位移造成强度轻微变化
+
+Log-Gabor滤波器关心的不是像素的绝对值，而是**局部有没有某种尺度上的结构响应**——比如这里有没有明显边界？有没有周期性结构？有没有某个尺度上的突变？这比直接比较原始像素值稳定得多。
 
 **具体操作**：
-1. 使用8个不同尺度的1D LoG-Gabor滤波器，对LiDAR-Iris图像的**每一行**进行卷积。每个滤波器的波长按相同因子递增（就像用从细到粗的8把"刷子"分别刷一遍）
+1. 使用8个不同尺度的1D Log-Gabor滤波器，对LiDAR-Iris图像的**每一行**进行卷积（实际做法：图像 → FFT → 频域乘以Log-Gabor滤波器 → IFFT → 得到滤波响应）。每个滤波器的波长按相同因子递增（就像用从细到粗的8把"刷子"分别刷一遍）
 2. 取卷积响应的**实部和虚部**作为特征
 3. 实验发现，使用**前4个**滤波器就能达到最佳性能（更多滤波器只会增加计算量，不提升精度）
 
@@ -145,7 +180,14 @@ $$
 
 这和人虹膜识别中经典的**IrisCode**完全一样——IrisCode就是对虹膜图像用Gabor滤波后二值化得到的。LiDAR Iris把同样的思路搬到了LiDAR点云上。
 
+二值化的好处：
+1. **极快的匹配**：XOR + popcount算Hamming距离，比浮点距离快几个数量级
+2. **对强度变化鲁棒**：只看响应的正负/相位，不看幅值大小，小的强度波动不一定改变bit值
+3. **紧凑**：每个位置的多通道响应组合成8-bit code，保留的是局部结构模式而非原始像素强度
+
 最终，每个LiDAR-Iris图像得到一个紧凑的**二值签名图像**（binary signature image），这就是LiDAR Iris的最终描述子。
+
+> **注意**：Log-Gabor滤波和前面的Fourier变换都用到了频域工具，但用途不同——Fourier/相位相关主要用于处理描述子图像上的循环位移，工程里最重要的是估计yaw相关的角向shift；Log-Gabor用于**提取纹理结构响应**（频域滤波）。不要把这个"图像循环位移"误解成真实世界$x/y$平移的可靠估计。
 
 #### 第四步：Hamming距离匹配
 
@@ -197,7 +239,7 @@ $$
 | 特性 | 说明 |
 |------|------|
 | 二值描述子 | 极紧凑，Hamming距离匹配极快，适合实时SLAM |
-| 平移不变 | Fourier变换消除不同朝向带来的循环平移 |
+| 角向循环偏移鲁棒 | Fourier/循环匹配降低yaw变化造成的水平循环偏移影响 |
 | 光照无关 | LiDAR本身不受光照和季节变化影响 |
 | 无需训练 | 手工设计特征，不需要大量训练数据，泛化性好 |
 | 高度编码保留更多信息 | 8位二进制码 vs Scan-Context的单一最大高度值 |
@@ -206,12 +248,597 @@ $$
 **缺点**：
 | 特性 | 说明 |
 |------|------|
-| 仅处理3D (x,y,yaw) | 默认假设2D平面运动，6D姿态需要额外IMU辅助对齐 |
+| 主要适合平面yaw回环 | 描述子匹配主要处理平面场景和朝向偏移，完整6DoF一致性需要IMU、GICP或其他几何验证补充 |
 | 垂直FOV敏感 | 编码参数（$y_l, y_h$）需要根据具体LiDAR传感器调整 |
 | 全局描述子 | 无法提供局部特征匹配能力 |
 | 高度离散化粗糙 | 8个子bin的高度分辨率有限 |
+| 对真实平移不可靠 | 横向/纵向位移不是简单循环shift，长廊等重复结构中容易产生假回环候选 |
+
+#### 长廊假回环的本质
+
+在长廊中，两次经过的机器人轨迹可能并不是同一条物理轨迹，而是存在一定横向偏移。但由于两侧墙面、地面、天花板等局部结构高度相似，LiDAR-Iris可能仍然给出很低的描述子距离。此时：
+
+1. Iris只说明"局部几何描述子很像"，不能证明它们是同一个物理位置；
+2. Iris返回的`yaw_bias`主要是角向循环偏移，不是完整的$x/y$位移估计；
+3. GICP会主动寻找一个刚体变换让两片点云尽量贴合，因此可能把真实存在的横向轨迹差当成配准误差修掉；
+4. 如果这条假回环边进入PGO，优化器会认真满足这条错误约束，把两条本来不同的长廊轨迹拉到一起，导致地图错位。
+
+因此，LCD不能只依赖"Iris距离 + GICP score"。实际系统中还需要：
+- submap-to-submap几何验证，而不是单帧对单帧；
+- 对GICP修正量做分轴gate，尤其限制不合理的横向/lateral correction；
+- sequence consistency，即连续几帧都支持同一段历史轨迹时才加入回环边；
+- top-K候选，而不是只相信Iris距离最小的单个候选。
 
 #### 在SLAM系统中的位置
 ```
 前端里程计(LIO/LVO) → 后端优化(PGO) → [回环检测: LiDAR Iris] → 回环约束 → 后端优化修正
+```
+
+## $\text{PGO}$
+
+### 基本概念
+
+位姿图优化（Pose Graph Optimization, PGO）是SLAM后端的核心，通过最小化所有约束边的误差来修正轨迹漂移。
+
+**位姿图结构**：
+```
+节点 (Vertex) = 关键帧的位姿 T = [R t; 0 1]
+边 (Edge) = 两个位姿之间的约束（里程计边/回环边）
+
+里程计边 (蓝色): kf0 → kf1 → kf2 → kf3 → kf4
+回环边 (橙色): kf4 → kf0 (检测到回环)
+```
+
+**优化目标**：
+$$
+\min_{\mathbf{T}} \sum_{(i,j) \in \mathcal{E}} \mathbf{e}_{ij}^T \Omega_{ij} \mathbf{e}_{ij}
+$$
+
+其中：
+- $\mathbf{e}_{ij}$：边 $(i,j)$ 的误差（观测相对位姿与估计相对位姿的差异）
+- $\Omega_{ij} = \Sigma_{ij}^{-1}$：信息矩阵（协方差矩阵的逆，表示置信度）
+
+### 信息矩阵与协方差矩阵
+
+**协方差矩阵 $\Sigma$**：表示测量的不确定性，对角线元素是各维度的方差 $\sigma_i^2$
+
+**信息矩阵 $\Omega = \Sigma^{-1}$**：表示测量的置信度，对角线元素是各维度的精度 $1/\sigma_i^2$
+
+为什么用 $\Sigma^{-1}$ 而不是 $\Sigma$？
+- 从高斯分布推导：$p(\mathbf{x}) \propto \exp(-\frac{1}{2}(\mathbf{x}-\boldsymbol{\mu})^T \Sigma^{-1} (\mathbf{x}-\boldsymbol{\mu}))$
+- $\Sigma^{-1}$ 自然出现在指数项的分母上，代表归一化因子
+- 优化目标是最小化加权误差：$\min \mathbf{e}^T \Omega \mathbf{e}$
+- $\Omega$ 大 → 置信度高 → 权重大 → 优化器更"信任"这条边
+
+**实际设置**：
+
+早期实现可以用统一标量权重：
+```cpp
+Eigen::Matrix6d odom_info = Eigen::Matrix6d::Identity() * 100.0;
+Eigen::Matrix6d loop_info = Eigen::Matrix6d::Identity() * 500.0;
+```
+
+但统一标量无法表达不同自由度的可靠性。当前实现更推荐使用6DoF对角信息矩阵：
+```yaml
+# order: [x, y, z, roll, pitch, yaw]
+pgo_odom_info_diag: [150.0, 150.0, 50.0, 40.0, 40.0, 200.0]
+pgo_loop_info_diag: [650.0, 650.0, 250.0, 150.0, 150.0, 850.0]
+```
+
+数值越大，表示优化器越信任该自由度上的约束。长廊等退化场景中，通常不应该让z/roll/pitch和x/y/yaw拥有同等权重。
+
+### g2o 求解器架构
+
+g2o 的优化器由三层组成：
+```
+┌─────────────────────────────────────┐
+│         SparseOptimizer             │  ← 顶层：管理图结构
+├─────────────────────────────────────┤
+│      OptimizationAlgorithm          │  ← 中层：优化算法 (LM/GN)
+├─────────────────────────────────────┤
+│         BlockSolver                  │  ← 底层：分块稀疏矩阵
+├─────────────────────────────────────┤
+│        LinearSolver                  │  ← 最底层：Ax = b
+└─────────────────────────────────────┘
+```
+
+- **LinearSolver**：求解线性方程组 $H\Delta x = b$（Eigen/CSparse/Cholmod）
+- **BlockSolver**：把稀疏的 H 矩阵按节点分块，加速求解
+- **OptimizationAlgorithm**：Levenberg-Marquardt（推荐，鲁棒）或 Gauss-Newton（快但可能发散）
+
+### g2o 核心类型
+
+**Vertex（节点）**：
+```cpp
+auto *v = new g2o::VertexSE3();  // 6DOF 位姿节点
+v->setId(0);                     // 唯一标识
+v->setEstimate(pose);            // 当前位姿估计（Isometry3d）
+v->setFixed(true);               // 是否固定（第一个节点通常6DoF全固定）
+```
+
+**Edge（边）**：
+```cpp
+auto *e = new g2o::EdgeSE3();    // SE3 约束边
+e->setVertex(0, v_from);         // 起点
+e->setVertex(1, v_to);           // 终点
+e->setMeasurement(relative_pose); // 观测的相对位姿
+e->setInformation(info_matrix);   // 信息矩阵（置信度）
+```
+
+**Isometry3d**：Eigen 的刚体变换类型，保证旋转矩阵正交（$R^T R = I$）
+```cpp
+Eigen::Isometry3d T = Eigen::Isometry3d::Identity();
+T.linear() = R;           // 旋转部分
+T.translation() = t;      // 平移部分
+```
+
+### 完整 PGO 流程
+
+```
+关键帧到达
+    ↓
+添加节点 (VertexSE3)
+    ↓
+添加里程计边 (EdgeSE3)
+    ↓
+检测回环 (LiDAR Iris)
+    ↓
+GICP 验证回环
+    ↓
+添加回环边 (EdgeSE3)
+    ↓
+执行优化 (g2o LM)
+    ↓
+读取优化结果
+    ↓
+更新位姿 / 修正地图
+```
+
+### PoseGraphOptimizationSummary
+
+优化结果摘要：
+```cpp
+struct PoseGraphOptimizationSummary {
+    bool success = false;        // 优化是否成功
+    int iterations = 0;          // 迭代次数
+    int node_count = 0;          // 节点数量
+    int edge_count = 0;          // 边数量
+    double initial_chi2 = 0.0;   // 优化前的卡方值（总误差）
+    double final_chi2 = 0.0;     // 优化后的卡方值
+    std::string message;         // 状态信息
+};
+```
+
+**chi2（卡方）**：衡量图"不一致程度"的指标
+- $\chi^2 = \sum \mathbf{e}_{ij}^T \Omega_{ij} \mathbf{e}_{ij}$
+- chi2 大 → 图不一致，误差大（有漂移）
+- chi2 小 → 图比较一致，误差小
+- 优化目标：最小化 chi2
+
+## $\text{代码实现}$
+
+### 整体架构
+
+```
+loop_detector_node (独立节点)
+    ├── LiDAR Iris 回环检测
+    ├── GICP 验证
+    ├── PoseGraph 位姿图管理
+    └── g2o 优化求解
+
+数据流：
+    /keyframe_msg → callbackKeyFrame()
+        → computeIrisDescriptor()       // 计算 Iris 描述子
+        → addKeyFrameToPoseGraph()      // 添加节点和里程计边
+        → detectLoopCandidate()         // Iris 快速筛选候选
+        → verifyLoopCandidateByGicp()   // GICP/submap-to-submap几何验证
+        → addLoopCandidateToPoseGraph() // 添加回环边
+        → optimizePoseGraphIfNeeded()   // 触发 PGO
+```
+
+### PoseGraph 类设计
+
+```cpp
+class PoseGraph {
+public:
+    void configure(const PoseGraphOptions &options);
+    bool addNode(const PoseGraphNode &node);
+    bool addOdomEdge(uint32_t from, uint32_t to,
+                     const Eigen::Isometry3d &relative_pose,
+                     const Eigen::Matrix6d &information);
+    bool addLoopEdge(uint32_t from, uint32_t to,
+                     const Eigen::Isometry3d &relative_pose,
+                     const Eigen::Matrix6d &information,
+                     double score);
+    PoseGraphOptimizationSummary optimize();
+    
+private:
+    PoseGraphOptions options_;
+    std::vector<PoseGraphNode> nodes_;
+    std::vector<PoseGraphEdge> edges_;
+    std::unordered_map<uint32_t, size_t> node_index_;
+};
+```
+
+### optimize() 实现要点
+
+```cpp
+PoseGraphOptimizationSummary PoseGraph::optimize() {
+    // ① 创建优化器
+    g2o::SparseOptimizer optimizer;
+    optimizer.setVerbose(false);
+    
+    // ② 线性求解器 + 块求解器 + LM 算法
+    auto linear_solver = std::make_unique<LinearSolverType>();
+    auto block_solver = std::make_unique<BlockSolverType>(std::move(linear_solver));
+    auto algorithm = new g2o::OptimizationAlgorithmLevenberg(std::move(block_solver));
+    optimizer.setAlgorithm(algorithm);
+    
+    // ③ 添加节点
+    for (const auto &node : nodes_) {
+        auto *v = new g2o::VertexSE3();
+        v->setId(node.id);
+        v->setEstimate(node.pose);
+        v->setFixed(node.fixed);  // 第一个节点6DoF全固定
+        optimizer.addVertex(v);
+    }
+    
+    // ④ 添加边
+    for (const auto &edge : edges_) {
+        auto *e = new g2o::EdgeSE3();
+        e->setVertex(0, optimizer.vertex(edge.from_id));
+        e->setVertex(1, optimizer.vertex(edge.to_id));
+        e->setMeasurement(edge.relative_pose);
+        e->setInformation(edge.information);
+        optimizer.addEdge(e);
+    }
+    
+    // ⑤ 执行优化
+    optimizer.initializeOptimization();
+    summary.initial_chi2 = optimizer.activeChi2();
+    summary.iterations = optimizer.optimize(options_.max_iterations);
+    
+    // ⑥ 读取优化结果
+    for (auto &node : nodes_) {
+        auto *v = dynamic_cast<g2o::VertexSE3*>(optimizer.vertex(node.id));
+        if (v) node.pose = v->estimate();
+    }
+}
+```
+
+### 回环检测流程
+
+```cpp
+void LoopDetectorNode::callbackKeyFrame(const KeyFrame::SharedPtr msg) {
+    // ① 转换消息并计算 Iris 描述子
+    LoopKeyFrame keyframe;
+    convertKeyFrameMsg(*msg, keyframe);
+    computeIrisDescriptor(keyframe);
+
+    // ② 先把当前关键帧加入 PGO 图
+    // 第一帧会被固定；后续帧会添加 odom edge
+    const bool pgo_node_added =
+        pgo_enable_ && addKeyFrameToPoseGraph(keyframe);
+
+    // ③ Iris 快速筛选候选
+    bool added_loop_edge = false;
+    LoopCandidate candidate;
+    if (loop_enable_ && detectLoopCandidate(keyframe, candidate)) {
+
+        // ④ GICP 几何验证。当前实现可选 submap-to-submap，
+        // 并用 odom / iris+yaw / iris-yaw 三种初值择优。
+        if (!loop_gicp_enable_ || verifyLoopCandidateByGicp(keyframe, candidate)) {
+            loop_candidates_.push_back(candidate);
+
+            // ⑤ 当前节点已经在图里时，才把回环边加入 PGO
+            if (pgo_node_added && pgo_enable_)
+                added_loop_edge = addLoopCandidateToPoseGraph(candidate);
+        }
+    }
+
+    // ⑥ 存储关键帧并触发优化
+    storeKeyFrame(std::move(keyframe));
+    if (pgo_enable_)
+        optimizePoseGraphIfNeeded(added_loop_edge);
+}
+```
+
+注意：不是只有发生回环的关键帧才有优化位姿。只要关键帧被加入PoseGraph，它就是图节点；回环边只是在已有odom chain上增加额外约束。PGO优化后，图中的所有节点都会得到优化位姿。
+
+### GICP 验证
+
+```cpp
+bool LoopDetectorNode::verifyLoopCandidateByGicp(
+    const LoopKeyFrame &current,
+    LoopCandidate &candidate
+) {
+    // ① 找到 history 关键帧，并计算 odom 相对位姿作为基础初值
+    const Eigen::Matrix4d init_guess =
+        T_history_lidar.inverse() * T_current_lidar;
+
+    // ② 可选 map-to-map：把 anchor 往前 k 帧拼成局部子图
+    // 每个点云先变换到各自 anchor 的 lidar frame
+    source_cloud = loop_gicp_use_submap_
+        ? buildLoopGicpSubmap(current)
+        : current.cloud;
+    target_cloud = loop_gicp_use_submap_
+        ? buildLoopGicpSubmap(history)
+        : history.cloud;
+
+    // ③ Iris 的 yaw_bias 只表示角向循环偏移，不是 x/y 位移估计。
+    // 当前实现会跑三种 GICP 初值：odom、iris+yaw、iris-yaw。
+    init_odom = init_guess;
+    init_iris_pos = yaw(candidate.yaw_bias) * init_guess;
+    init_iris_neg = yaw(-candidate.yaw_bias) * init_guess;
+
+    result_odom = gicp(source_cloud, target_cloud, init_odom);
+    result_pos  = gicp(source_cloud, target_cloud, init_iris_pos);
+    result_neg  = gicp(source_cloud, target_cloud, init_iris_neg);
+
+    // ④ 每个结果都相对自己的初值计算 correction，先过 gate
+    // 再从通过 gate 的结果里选 score 最小的那个。
+    best = nullptr;
+    for trial in [odom, iris_pos, iris_neg]:
+        correction = trial.init.inverse() * trial.result.transform;
+        if trial.success &&
+           trial.score < loop_gicp_score_thresh_ &&
+           correction.translation_norm < loop_gicp_max_correction_trans_ &&
+           correction.rotation_deg < loop_gicp_max_correction_rot_deg_:
+            best = score_smaller(best, trial);
+
+    if (!best) return false;
+
+    candidate.gicp_score = best.score;
+    candidate.source_to_target = best.transform;
+    candidate.gicp_verified = true;
+    return true;
+}
+```
+
+这一步要注意：GICP验证的是"两片点云是否能被一个刚体变换配准好"，不等价于"它们一定是同一物理位置"。在长廊等重复结构里，GICP可能把真实存在的横向轨迹差当成配准误差修掉，所以还需要分轴gate、sequence consistency等额外约束。
+
+### 信息矩阵计算
+
+当前实现支持6DoF对角信息矩阵，顺序为：
+
+```text
+[x, y, z, roll, pitch, yaw]
+```
+
+示例配置：
+
+```yaml
+pgo_odom_info_diag: [150.0, 150.0, 50.0, 40.0, 40.0, 200.0]
+pgo_loop_info_diag: [650.0, 650.0, 250.0, 150.0, 150.0, 850.0]
+```
+
+代码逻辑等价于：
+
+```cpp
+Eigen::Matrix6d LoopDetectorNode::makeInformationMatrix(
+    const std::vector<double> &diag,
+    double fallback_weight
+) const {
+    if (diag.size() == 6 && all_positive_finite(diag)) {
+        Eigen::Matrix6d info = Eigen::Matrix6d::Zero();
+        for (int i = 0; i < 6; ++i)
+            info(i, i) = diag[i];
+        return info;
+    }
+
+    // 兼容旧参数：数组没填或非法时退回 weight * I
+    return fallback_weight * Eigen::Matrix6d::Identity();
+}
+```
+
+为什么要分轴？因为不同自由度的可靠性通常不同。例如长廊场景中，水平位置和yaw可能比较重要，但z、roll、pitch容易受退化或外参误差影响。用统一的`weight * I`无法表达这种差异。
+
+### 位姿转换工具函数
+
+```cpp
+// ROS Pose → 4×4 矩阵
+Eigen::Matrix4d poseToMatrix(const geometry_msgs::msg::Pose &pose);
+
+// 4×4 矩阵 → Isometry3d（保证旋转矩阵正交）
+Eigen::Isometry3d matrixToIsometry(const Eigen::Matrix4d &matrix);
+
+// ROS Pose → Isometry3d
+Eigen::Isometry3d poseToIsometry(const geometry_msgs::msg::Pose &pose);
+
+// Isometry3d → ROS Pose
+geometry_msgs::msg::Pose isometryToPose(const Eigen::Isometry3d &pose);
+```
+
+## $\text{代码编写注意事项}$
+
+### 1. 避免频繁拷贝点云
+
+**问题**：GICP 配准需要传入点云，如果每次都拷贝，开销巨大
+
+```cpp
+// ❌ 错误：每次调用都拷贝点云
+bool verifyLoopCandidate(const LoopKeyFrame &current, const LoopKeyFrame &history) {
+    pcl::PointCloud<pcl::PointXYZ>::Ptr src(new pcl::PointCloud<pcl::PointXYZ>(*current.cloud));
+    pcl::PointCloud<pcl::PointXYZ>::Ptr tgt(new pcl::PointCloud<pcl::PointXYZ>(*history.cloud));
+    gicp_matcher_.align(src, tgt, init_guess);
+}
+
+// ✅ 正确：使用 shared_ptr，避免拷贝
+bool verifyLoopCandidate(const LoopKeyFrame &current, const LoopKeyFrame &history) {
+    gicp_matcher_.align(current.cloud, history->cloud, init_guess);  // 传引用
+}
+```
+
+**教训**：昨晚发现 GICP 配准变慢，排查后发现是点云被频繁拷贝。改为传引用后性能提升明显。
+
+### 2. Iris 描述子只计算一次
+
+```cpp
+// ❌ 错误：每次检测都重新计算
+bool detectLoopCandidate(const LoopKeyFrame &current, ...) {
+    cv::Mat1b iris_image = LidarIris::GetIris(*current.cloud);  // 重复计算
+    auto descriptor = lidar_iris_->GetFeature(iris_image);
+}
+
+// ✅ 正确：存入 keyframe，只计算一次
+void callbackKeyFrame(const KeyFrame::SharedPtr msg) {
+    LoopKeyFrame keyframe;
+    convertKeyFrameMsg(*msg, keyframe);
+    computeIrisDescriptor(keyframe);  // 只计算一次
+    storeKeyFrame(std::move(keyframe));
+}
+```
+
+### 3. 使用 std::move 减少拷贝
+
+**核心原则**：当你不再需要一个对象的值时，用 `std::move` 把它"转移"给别人，避免拷贝。
+
+```cpp
+// ❌ 错误：拷贝整个 keyframe（之后不再使用 keyframe）
+storeKeyFrame(keyframe);
+
+// ✅ 正确：移动语义
+storeKeyFrame(std::move(keyframe));
+```
+
+**从容器"拿走"数据时，用 `std::move`**，因为原数据马上就要被销毁了，没必要拷贝一份再销毁：
+
+```cpp
+// ❌ 拷贝：取出后原数据还在容器里，浪费
+auto keyframe = keyframes_.front();  // 拷贝
+keyframes_.erase(keyframes_.begin()); // 再删除
+
+// ✅ 移动：取出时直接"掏空"容器里的数据
+auto keyframe = std::move(keyframes_.front());  // 移动
+keyframes_.erase(keyframes_.begin());           // 删除（已经是空壳）
+```
+
+队列同理：
+
+```cpp
+// ❌ 拷贝：从队列取数据处理
+while (!queue.empty()) {
+    auto item = queue.front();  // 拷贝
+    queue.pop();                // 删除原数据
+    process(item);
+}
+
+// ✅ 移动：直接取走
+while (!queue.empty()) {
+    auto item = std::move(queue.front());  // 移动
+    queue.pop();
+    process(item);
+}
+```
+
+**注意**：返回局部变量时**不要用** `std::move`，编译器会自动优化（RVO/NRVO）：
+
+```cpp
+// ❌ 错误：move 反而阻止了返回值优化
+Eigen::Isometry3d matrixToIsometry(const Eigen::Matrix4d &matrix) {
+    Eigen::Isometry3d T = Eigen::Isometry3d::Identity();
+    return std::move(T);  // 不要这样做！
+}
+
+// ✅ 正确：直接返回
+Eigen::Isometry3d matrixToIsometry(const Eigen::Matrix4d &matrix) {
+    Eigen::Isometry3d T = Eigen::Isometry3d::Identity();
+    return T;  // 编译器自动优化
+}
+```
+
+### 4. 信息矩阵对称化
+
+```cpp
+// 添加边时自动对称化信息矩阵
+bool PoseGraph::addEdge(PoseGraphEdge edge) {
+    // 确保信息矩阵对称（浮点误差可能导致不对称）
+    edge.information = 0.5 * (edge.information + edge.information.transpose());
+    edges_.push_back(std::move(edge));
+    return true;
+}
+```
+
+### 5. 数值检查
+
+```cpp
+// 添加节点前检查位姿是否有效
+if (!pose.matrix().allFinite()) return false;
+
+// 添加边前检查信息矩阵是否有效
+if (!information.allFinite()) return false;
+
+// GICP 结果检查
+if (!result.transform.allFinite()) return false;
+
+// 四元数归一化
+Eigen::Quaterniond q(R);
+if (!q.coeffs().allFinite() || q.norm() < 1e-6) return false;
+q.normalize();
+```
+
+### 6. 帧间隔过滤
+
+```cpp
+bool isCandidateAllowed(const LoopKeyFrame &current, const LoopKeyFrame &history) const {
+    // ID 间隔太小 → 相邻帧，跳过
+    const int id_gap = std::abs((int)current.id - (int)history.id);
+    if (id_gap < loop_min_keyframe_gap_) return false;
+    
+    // 行驶距离太小 → 还没走远，跳过
+    const double travel_gap = current.travel_distance - history.travel_distance;
+    if (travel_gap < loop_min_travel_distance_) return false;
+    
+    return true;
+}
+```
+
+### 7. 异常处理
+
+```cpp
+void LoopDetectorNode::callbackKeyFrame(const KeyFrame::SharedPtr msg) {
+    try {
+        // ... 主逻辑 ...
+    } catch (const cv::Exception &e) {
+        RCLCPP_ERROR(get_logger(), "OpenCV exception: %s", e.what());
+    } catch (const std::exception &e) {
+        RCLCPP_ERROR(get_logger(), "Exception: %s", e.what());
+    }
+}
+```
+
+### 8. 性能监控
+
+```cpp
+// 统计各项指标
+RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 2000,
+    "Loop detector status: received=%lu stored=%lu graph_nodes=%zu "
+    "graph_edges=%zu candidates=%zu iris_fail=%lu hits=%lu misses=%lu",
+    received_keyframes_, stored_keyframes_,
+    pose_graph_.nodeCount(), pose_graph_.edgeCount(),
+    loop_candidates_.size(), iris_failures_,
+    candidate_hits_, candidate_misses_);
+```
+
+### 9. 关键参数
+
+```yaml
+# 回环检测参数
+loop_enable: true
+loop_min_keyframe_gap: 30        # 最小帧间隔
+loop_min_travel_distance: 5.0    # 最小行驶距离
+loop_iris_distance_thresh: 0.30  # Iris Hamming 距离阈值
+
+# GICP 验证参数
+loop_gicp_enable: true
+loop_gicp_score_thresh: 0.5     # GICP 配准误差阈值
+loop_gicp_max_correction_trans: 1.0  # 最大平移修正量
+loop_gicp_max_correction_rot_deg: 30.0  # 最大旋转修正量
+
+# PGO 参数
+pgo_enable: true
+pgo_optimize_on_loop: true       # 检测到回环时才优化
+pgo_max_iterations: 20           # 最大迭代次数
+pgo_odom_edge_weight: 100.0      # 里程计边权重
+pgo_loop_edge_weight: 500.0      # 回环边权重
 ```

@@ -4687,6 +4687,63 @@ source /opt/ros/<distro>/setup.bash
 ros2 bag play ~/fastlio/rosbag2_mid360_10hz --clock
 ```
 
+### small_dlio 后端联调命令记录
+
+#### rosbag2_2026_04_27-18_26_11
+
+FAST-LIO：
+
+```bash
+ros2 launch fast_lio mapping.launch.py config_file:=mid360.yaml use_sim_time:=false rviz:=true
+```
+
+播放 rosbag：
+
+```bash
+ros2 bag play /home/goose/下载/rosbag2_2026_04_27-18_26_11 \
+  --clock \
+  --remap /livox/imu_192_168_1_185:=/livox/imu
+```
+
+small_dlio 后端：
+
+```bash
+ros2 launch dlio fastlio_backend.launch.py
+```
+
+#### garage_ros2_bag
+
+FAST-LIO：
+
+```bash
+ros2 launch fast_lio mapping.launch.py \
+  config_file:=/home/goose/small_dlio/src/dlio/config/fastlio_garage_mid360.yaml \
+  use_sim_time:=false \
+  rviz:=true
+```
+
+small_dlio 后端：
+
+```bash
+ros2 launch dlio fastlio_backend.launch.py \
+  accumulator:=false \
+  map_frame:=camera_init \
+  body_frame:=body \
+  odom_topic:=/Odometry \
+  cloud_topic:=/cloud_registered_body \
+  candidate_keyframe_topic:=/keyframe_candidates \
+  keyframe_topic:=/keyframe_msg \
+  loop_gicp_use_submap:=true \
+  loop_gicp_submap_keyframes:=7 \
+  loop_gicp_submap_leaf_size:=0.1
+```
+
+播放 rosbag：
+
+```bash
+ros2 bag play /home/goose/下载/garage_ros2_bag
+```
+
 ---
 
 ## 配置文件说明
