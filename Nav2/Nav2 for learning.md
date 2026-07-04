@@ -1848,6 +1848,74 @@ bool buildGraph(
 这是为了连接nav接口层面与图优化层面的适配层，实际上整个图优化和输入输出数据流程都是在这个节点进行的，只是图优化方面，单独包装成了几个接口函数，可以通过函数调用图优化
 因此本文件只需构建controller插件所需的对应函数重载以及图优化接口函数即可
 
+##### TEB一直追`teb_trajectory_[1].pose`导致速度变小的问题
+在当前自定义`my_teb_controller`中，最终输出速度的函数是`extractVelocity()`。它并不是直接跟踪整条全局路径，而是从优化后的`teb_trajectory_`里取前两个点计算第一段速度，其中目标点固定是：
+```cpp
+const PoseSE2 &target_pose = teb_trajectory_[1].pose;
+const double dt = std::max(teb_trajectory_[0].dt, minimumTimeDiff(config_));
+MecanumVelocity desired_velocity = computeSegmentVelocity(robot_pose, target_pose, dt);
+```
+
+也就是说，控制器每一帧真正追的是当前局部 TEB 轨迹中的第二个点。如果局部路径裁剪不合理，`teb_trajectory_[1]`可能长期落在机器人身后、机器人当前位置附近，或者已经走过但仍然残留在局部路径前端。此时控制器看到的“目标点”距离机器人非常近，算出来的$v_x,v_y,\omega$会逐渐变得很小，表现就是小车刚开始能动一段，随后速度越来越小，看起来像卡住。
+
+这个问题容易和路径管理节点混在一起误判。`ManageTrajectory`缓存 active path 后，如果 controller 端裁剪逻辑仍然保留已经走过的路径点，那么 RViz 里的 TEB marker 可能看起来还有局部轨迹，但底盘实际追的`teb_trajectory_[1]`却不是一个有效的前方目标点。
+
+修复点在`cropGlobalPlan()`。基本思路不是简单保留传入全局路径的开头，而是先在`global_plan_`中找到离机器人最近的路径点`nearest_index`，然后从这个点继续往后跳过距离机器人太近的点，最后只把`start_index`之后的路径点作为局部路径交给 TEB 初始化和优化：
+```cpp
+size_t nearest_index = 0;
+double nearest_distance = std::numeric_limits<double>::infinity();
+for (size_t index = 0; index < global_plan_.poses.size(); ++index) {
+    const double dx = global_plan_.poses[index].pose.position.x - robot_pose.x;
+    const double dy = global_plan_.poses[index].pose.position.y - robot_pose.y;
+    const double distance = std::hypot(dx, dy);
+    if (distance < nearest_distance) {
+        nearest_distance = distance;
+        nearest_index = index;
+    }
+}
+
+size_t start_index = nearest_index;
+while (start_index + 1 < global_plan_.poses.size()) {
+    const auto &pose = global_plan_.poses[start_index].pose.position;
+    const double distance = std::hypot(pose.x - robot_pose.x, pose.y - robot_pose.y);
+    if (distance >= config_.min_forward_prune_distance) {
+        break;
+    }
+    ++start_index;
+}
+
+for (size_t index = start_index; index < global_plan_.poses.size(); ++index) {
+    cropped_plan.poses.push_back(global_plan_.poses[index]);
+    if (static_cast<int>(cropped_plan.poses.size()) >= config_.max_samples) {
+        break;
+    }
+}
+```
+
+这里的`min_forward_prune_distance`就是“局部路径第一个有效目标点至少要离机器人多远”的阈值。当前配置中可以放在`controller_server -> FollowPath`下：
+```yaml
+min_forward_prune_distance: 0.2
+```
+
+这个值太小，`teb_trajectory_[1]`仍可能离机器人过近，速度容易变小；这个值太大，则会跳过过多路径点，局部路径可能变得不够贴合全局路径。对当前小车来说，先取`0.2m`是比较保守的调试值，后续可以根据路径点间距、控制频率和车速继续调整。
+
+修复后的数据流是：
+```text
+FollowPath收到 active path
+        ↓
+cropGlobalPlan() 找 nearest_index
+        ↓
+跳过机器人身后和过近路径点
+        ↓
+用 start_index 之后的路径初始化 TEB
+        ↓
+extractVelocity() 追踪有效的 teb_trajectory_[1]
+        ↓
+cmd_vel 不再因为追近点/旧点而趋近 0
+```
+
+这个问题的排查经验是：当`/cmd_vel`一开始有速度，但走一小段后线速度和角速度都逐渐变得极小，而 RViz 中全局路径和 TEB marker 看起来又不是完全错误时，需要重点检查控制器内部到底追的是哪个局部目标点，而不是只看整条路径是否存在。
+
 #### 误差计算
 通过$\mathrm{Sophus}$库可以将我们的`/odom`话题下的位姿和在gazebo仿真中的位姿结合来计算轨迹误差$\boldsymbol{T}_{\mathrm{err}}$
 在此之前我们需要安装`tf2_eigen`以及`Sophus`库，前者一般已经安装完毕了（可以通过`sudo apt install ros-<ros-distro>-tf2-eigen`查看），后者最好是安装**模板类**版本的库：
@@ -2481,6 +2549,313 @@ planner_server:
 类似的即可，随后编译运行，在规划了路径后可以看到
 ![alt text](Image//image-15.png)
 此时的路径是锯齿状的，我们在后面进行平滑器的编写后可以将其优化为更顺化的曲线
+
+#### $\text{Hybrid A}^*$
+在普通`A*`之后，可以进一步写一个面向机器人运动约束的`Hybrid A*`全局规划器插件。当前项目中的插件功能包为`my_hybrid_astar_planner`，插件名配置为：
+```yaml
+planner_server:
+  ros__parameters:
+    planner_plugins: ["GridBased"]
+    GridBased:
+      plugin: "my_hybrid_astar_planner/MyHybridAStarPlanner"
+```
+
+这个插件仍然继承`nav2_core::GlobalPlanner`，核心入口仍然是`createPlan(start, goal, cancel_checker)`，因此它在`Nav2`中的调用方式和普通`A*`规划器一致，只是内部搜索状态不再只是二维栅格，而是连续位姿离散后的状态：
+```cpp
+struct PlannerPose {
+    double x = 0.0;
+    double y = 0.0;
+    double yaw = 0.0;
+};
+
+struct StateKey {
+    int mx = 0;
+    int my = 0;
+    int theta_id = 0;
+};
+```
+
+当前机器人底盘是麦克纳姆轮，所以运动原语不是汽车模型中的前轮转角，也不是差速模型的左右轮速度，而是直接用底盘速度$(v_x, v_y, \omega)$构造。也就是说搜索扩展时可以包含前进、后退、横移、斜向移动和原地旋转等原语：
+```cpp
+struct MotionPrimitive {
+    int id = -1;
+    double v_x = 0.0;
+    double v_y = 0.0;
+    double omega = 0.0;
+    double duration = 0.0;
+    double travel_cost = 0.0;
+    MotionDirection direction = MotionDirection::FORWARD;
+    std::vector<MotionSample> samples;
+};
+```
+
+连续运动积分使用麦轮底盘在世界系下的位移变换：
+```cpp
+next_pose.x = start_pose.x + (v_x * cos_yaw - v_y * sin_yaw) * dt;
+next_pose.y = start_pose.y + (v_x * sin_yaw + v_y * cos_yaw) * dt;
+next_pose.yaw = normalizeAngle(start_pose.yaw + omega * dt);
+```
+
+为了让`Hybrid A*`的启发式更稳定，当前实现会先以目标点为起点，在全局代价地图上跑一次二维`Dijkstra`，把每个栅格到目标点的代价记录到`heuristic_grid_`中。后续三维搜索节点的启发式代价可以由几部分组成：
+
+- `h_grid`：二维栅格到目标点的代价，来自前面那次`Dijkstra`，可以同时考虑障碍物膨胀代价和未知区域代价。
+- `h_yaw`：当前朝向和目标朝向的误差代价，用来让终点姿态更合理。
+- `h_rs`：类似`Reed-Shepp`的估计代价项，用于补充连续运动方向、倒车、换向等代价偏好。
+- `g`：从起点到当前节点真实累计出来的运动代价。
+- `f`：优先队列排序使用的总代价，通常为`g + h_grid + h_yaw + h_rs`。
+
+这里要注意，`g`和`h_grid`语义不同。`g`是已经走过的真实代价，`h_grid`是还没走的估计剩余代价。两者一起构成`A*`搜索中的`f`。
+
+当前常用参数类似如下：
+```yaml
+primitive_duration: 0.2
+step_time: 0.05
+yaw_bin_count: 96
+heuristic_grid_weight: 1.0
+heuristic_yaw_weight: 0.1
+rs_weight: 0.05
+reuse_path_if_valid: true
+immediate_replan_if_blocked: true
+replan_time_threshold: 5.0
+path_prune_distance: 0.15
+```
+
+其中`primitive_duration`表示每个运动原语持续的时间，`step_time`表示模拟这个原语时的积分步长，`yaw_bin_count`表示把$[-\pi,\pi)$离散成多少个朝向桶。`reuse_path_if_valid`表示如果上一条路径仍然可用，则规划器可以直接返回缓存路径。`immediate_replan_if_blocked`表示缓存路径被障碍物遮挡时立即允许重规划。`replan_time_threshold`表示即使路径没有被遮挡，也最多隔几秒允许重新规划一次。
+
+##### 路径跳变问题
+`Hybrid A*`和普通二维`A*`相比，更容易出现每次重规划得到的路径不完全一样的情况。原因是它的状态空间包含$x,y,\theta$，并且运动原语数量更多，搜索过程会受起点姿态、当前裁剪位置、启发式权重、障碍代价、优先队列同代价排序等因素影响。即使每次规划出的路径看起来都合理，路径前端也可能发生明显变化。
+
+在`Nav2`默认行为树中，典型数据流是：
+```text
+ComputePathToPose -> SmoothPath -> FollowPath
+```
+
+这不是简单的话题发布订阅，而是`BT Navigator`通过各个 action server 进行调用。`ComputePathToPose`每次 tick 会得到一条新路径，`SmoothPath`再平滑这条路径，最后`FollowPath`把路径交给控制器。如果每隔几秒强制重新规划，并且每次都直接把新的平滑路径交给控制器，控制器前方那一小段参考路径就会频繁变化。对`TEB`这类局部控制器来说，局部轨迹会不断被新的全局路径前端扰动，表现出来就是小车运动不稳定、速度变小，甚至看起来像卡住。
+
+这里的关键判断是：`RViz`中看到的规划器路径变化，不等于控制器一定应该立刻切换到这条路径。规划器可以持续生成`candidate path`，但控制器应该跟踪一个更稳定的`active path`。只有在特定事件发生时，才把`candidate path`提升为新的`active path`。
+
+##### 自定义BT节点管理轨迹
+为了解决这个问题，项目中新增了一个自定义行为树节点`ManageTrajectory`，功能包为`my_nav2_bt_nodes`。它被插在`SmoothPath`和`FollowPath`之间：
+```xml
+<ComputePathToPose goal="{goal}"
+                   path="{raw_path}"
+                   planner_id="GridBased"/>
+<SmoothPath smoother_id="simple_smoother"
+            unsmoothed_path="{raw_path}"
+            smoothed_path="{candidate_path}"/>
+<ManageTrajectory input_path="{candidate_path}"
+                  output_path="{path}"
+                  goal="{goal}"
+                  replan_event_topic="trajectory_generation/replan_event"/>
+<FollowPath path="{path}"
+            controller_id="FollowPath"/>
+```
+
+这样行为树中的路径语义变成：
+
+- `raw_path`：规划器刚生成的原始候选路径。
+- `candidate_path`：平滑器处理后的候选路径。
+- `path`：真正交给控制器的 active path。
+
+`ManageTrajectory`内部缓存`active_path_`和`active_goal_`。如果没有缓存路径，或者导航目标发生变化，它会接受当前`candidate_path`。如果目标没变，它默认继续输出旧的`active_path_`，从而避免控制器每次都收到一条前端不同的新路径。
+
+##### 重规划事件话题
+仅仅缓存 active path 还不够，因为如果路径被障碍物挡住，或者时间间隔到了，确实应该允许切换到新的路径。因此当前方案保留规划器内部原有的“障碍物触发重规划”和“时间间隔触发重规划”逻辑，但规划器在成功生成新路径后，会额外发布一个重规划事件，让`ManageTrajectory`消费这个事件并接受新的`candidate_path`。
+
+事件消息定义在`rm_interfaces/msg/ReplanEvent.msg`中：
+```text
+uint8 UNKNOWN=0
+uint8 GOAL_CHANGED=1
+uint8 TIME_EXPIRED=2
+uint8 PATH_BLOCKED=3
+uint8 FORCED=4
+
+std_msgs/Header header
+bool need_replan
+uint64 event_id
+uint8 reason
+builtin_interfaces/Time candidate_path_stamp
+geometry_msgs/PoseStamped goal
+```
+
+字段含义如下：
+
+- `need_replan`：这条事件是否要求接受新路径。
+- `event_id`：单调递增的事件编号，用来避免同一个事件被重复消费。
+- `reason`：触发原因，例如目标变化、时间到期、路径被障碍物遮挡或强制重规划。
+- `candidate_path_stamp`：这次成功规划得到的候选路径时间戳，用来把事件和对应的 path 绑定起来。
+- `goal`：事件对应的导航目标，用来避免旧目标的事件影响新目标。
+
+规划器发布话题时使用：
+```cpp
+replan_event_pub_ = node_->create_publisher<rm_interfaces::msg::ReplanEvent>(
+    "trajectory_generation/replan_event",
+    rclcpp::QoS(1).reliable().transient_local());
+```
+
+这里使用`transient_local`是因为`ManageTrajectory`可能晚于事件发布后才创建订阅，或者行为树节点重新加载后才开始订阅。`transient_local`可以让后加入的订阅者拿到最近一条事件，避免错过最新重规划状态。
+
+规划器中的逻辑大致是：
+```text
+如果有缓存路径：
+    检查目标是否变化
+    检查缓存路径是否被障碍物挡住
+    检查距离上次成功规划是否超过 replan_time_threshold
+
+    如果目标没变、路径没挡住、时间没到：
+        返回裁剪后的缓存路径，不发布重规划事件
+
+否则执行 Hybrid A* 搜索
+
+如果搜索成功：
+    更新 last_path_
+    更新 last_plan_time_
+    发布 ReplanEvent(reason, goal, planned_path.header.stamp)
+    返回新路径
+
+如果搜索失败：
+    不发布事件
+    返回空路径或失败结果
+```
+
+事件必须在“新路径成功生成之后”发布，而不是搜索前发布。否则如果搜索失败，`ManageTrajectory`会留下一个 pending 事件，后续可能错误地把某条不对应的 candidate path 当作这次事件的结果消费掉。
+
+`ManageTrajectory`消费事件时做几层校验：
+```text
+pending_replan_ 必须为 true
+event_id 不能已经消费过
+event_goal_ 必须和当前 goal 匹配
+candidate_path.header.stamp 不能早于 event.candidate_path_stamp
+```
+
+只有这些条件都满足，才会执行：
+```cpp
+active_path_ = input_path;
+active_goal_ = goal;
+has_active_path_ = true;
+```
+
+否则继续输出旧的`active_path_`。
+
+##### 为什么RViz路径变了但小车仍走旧路径
+这个现象是正常排查时很容易误判的点。`RViz`中看到的路径通常是规划器或平滑器刚生成的 candidate path，它可以每隔几秒变化。但是控制器实际收到的是`ManageTrajectory`输出的`path`。如果`ManageTrajectory`没有消费到`ReplanEvent`，那么它会继续输出第一次缓存的`active_path_`，小车自然仍然按照最开始那条路径走。
+
+所以排查时不能只看`RViz`路径，需要看日志和话题：
+```bash
+ros2 topic echo /trajectory_generation/replan_event
+```
+
+正常日志应该包含：
+```text
+Published replan event id=...
+ManageTrajectory received replan event id=...
+ManageTrajectory consumed replan event id=...
+```
+
+如果只有`Published`，但是没有`received`，说明规划器发布正常，话题也可能正常，但是`ManageTrajectory`内部订阅回调没有执行。如果有`received`但没有`consumed`，说明事件收到了，但是 goal 或 path stamp 校验没有通过。
+
+##### BT插件中的订阅回调问题
+这次调试中遇到的一个关键问题是：`ros2 topic echo /trajectory_generation/replan_event`能够看到数据，planner 日志里也有`Published replan event id=...`，但是`ManageTrajectory`没有打印`received`和`consumed`日志。
+
+根本原因是`ManageTrajectory`是一个`BehaviorTree.CPP`节点对象，不是独立的`rclcpp::Node`。它通过`config().blackboard->get<rclcpp::Node::SharedPtr>("node")`拿到的是`bt_navigator`内部的 ROS node。原始实现中直接写：
+```cpp
+replan_event_sub_ = node_->create_subscription<rm_interfaces::msg::ReplanEvent>(
+    replan_event_topic,
+    rclcpp::QoS(1).reliable().transient_local(),
+    std::bind(&ManageTrajectoryAction::onReplanEvent, this, std::placeholders::_1));
+```
+
+这会把 subscription 放进`bt_navigator` node 的默认 callback group。DDS层面消息已经到达，但对应 callback 是否执行，取决于`bt_navigator`主 executor 是否 spin 到这个 callback group。行为树节点本身只是被 tick 的同步对象，它不负责 spin ROS callback。因此就可能出现：
+```text
+topic echo 能收到
+planner 确实发布了
+但是 BT 插件内部 onReplanEvent() 一直没执行
+```
+
+解决方式是给事件订阅创建独立 callback group 和独立 executor 线程：
+```cpp
+event_callback_group_ = node_->create_callback_group(
+    rclcpp::CallbackGroupType::MutuallyExclusive,
+    false);
+
+rclcpp::SubscriptionOptions subscription_options;
+subscription_options.callback_group = event_callback_group_;
+
+replan_event_sub_ = node_->create_subscription<rm_interfaces::msg::ReplanEvent>(
+    replan_event_topic,
+    rclcpp::QoS(1).reliable().transient_local(),
+    std::bind(&ManageTrajectoryAction::onReplanEvent, this, std::placeholders::_1),
+    subscription_options);
+
+event_executor_ = std::make_unique<rclcpp::executors::SingleThreadedExecutor>();
+event_executor_->add_callback_group(event_callback_group_, node_->get_node_base_interface());
+event_executor_thread_ = std::thread([this]() {
+    event_executor_->spin();
+});
+```
+
+这里`create_callback_group(..., false)`中的`false`表示不要自动把这个 callback group 加入`bt_navigator`原来的 executor。然后我们手动创建一个`SingleThreadedExecutor`，只负责 spin 这个事件 callback group。这样事件订阅就不再依赖 Nav2 行为树主循环是否调度到它。
+
+对应析构函数中还需要取消 executor 并 join 线程：
+```cpp
+ManageTrajectoryAction::~ManageTrajectoryAction() {
+    if (event_executor_)
+        event_executor_->cancel();
+
+    if (event_executor_thread_.joinable())
+        event_executor_thread_.join();
+}
+```
+
+这样完整事件链路变为：
+```text
+Hybrid A* 成功生成新路径
+        ↓
+发布 ReplanEvent
+        ↓
+ManageTrajectory 独立 executor 收到事件
+        ↓
+onReplanEvent() 设置 pending_replan_
+        ↓
+下一次 tick() 校验 candidate_path
+        ↓
+通过后替换 active_path_
+        ↓
+FollowPath 收到新的稳定路径
+```
+
+##### 配置和验证要点
+`bt_navigator`需要加载自定义 BT 插件库：
+```yaml
+bt_navigator:
+  ros__parameters:
+    default_nav_to_pose_bt_xml: "/home/goose/nav2_test/src/my_nav2_robot/behavior_trees/test_nav.xml"
+    plugin_lib_names:
+      - my_manage_trajectory_bt_node
+```
+
+如果使用不同参数文件，例如`nav2_params_slam.yaml`，也要同步加入这个插件库，否则 XML 中出现`ManageTrajectory`时可能无法加载，或者运行的并不是预期的行为树节点。
+
+因为新增了`rm_interfaces/msg/ReplanEvent.msg`，所以修改后必须重新构建并重新 source：
+```bash
+source /opt/ros/jazzy/setup.bash
+colcon build --packages-select rm_interfaces my_hybrid_astar_planner my_nav2_bt_nodes
+source install/setup.bash
+```
+
+运行时至少检查三点：
+```bash
+ros2 topic echo /trajectory_generation/replan_event
+```
+
+日志中应该能看到：
+```text
+Published replan event id=...
+ManageTrajectory received replan event id=...
+ManageTrajectory consumed replan event id=...
+```
+
+如果路径仍然不切换，优先检查`candidate_path.header.stamp`是否早于`candidate_path_stamp`。如果切换过于频繁，则说明触发条件太宽，需要重新调整`replan_time_threshold`、障碍物检测范围或`ManageTrajectory`的消费策略。
 
 #### $\text{RRT}^*$
 rrt*基于rrt，而rrt又基于**随机树**，随机树的核心步骤就是在一个点附近一直随机扔节点，这很明显是不明智的，到达终点的可能性极低
