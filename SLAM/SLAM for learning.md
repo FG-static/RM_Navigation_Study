@@ -509,6 +509,51 @@ $$
 (\boldsymbol{H} + \lambda\boldsymbol{D}^T\boldsymbol{D})\Delta x_k = g$$
 这里的$\boldsymbol{H}$和$g$定义与上述的高斯牛顿法一致，当$\lambda$较小，$\boldsymbol{H}$占主导地位，说明该二次近似模型在该范围内是比较好的，该方法更接近高斯牛顿法。另一方面，当$\lambda$较大时，$\lambda \boldsymbol{I}$占主导地位，说明该模型的二次近似不够好，该方法更接近于一阶梯度下降法
 
+##### 拟牛顿法与 BFGS 算法
+
+###### 背景与动机
+
+在牛顿法中，我们需要计算目标函数的海塞矩阵 $\boldsymbol{H}$ 及其逆矩阵，这在优化变量维度非常高（例如大规模图优化或 BA）时计算代价极大。为了避免显式计算二阶导数和求逆，**拟牛顿法 (Quasi-Newton Methods)** 的核心思想是：**不直接求解海塞矩阵，而是通过迭代过程中的一阶梯度信息去构造一个近似海塞矩阵（或其逆矩阵）的对称正定矩阵**。
+
+###### BFGS 算法
+
+$\text{BFGS}$（Broyden-Fletcher-Goldfarb-Shanno）是目前最常用的拟牛顿法之一。它直接对逆海塞矩阵 $\boldsymbol{B}_k$（或记为 $\boldsymbol{H}_k^{-1}$）进行近似更新。
+定义第 $k$ 次迭代的位置增量与梯度增量分别为：
+
+
+$$\boldsymbol{s}_k = \boldsymbol{x}_{k+1} - \boldsymbol{x}_k, \quad \boldsymbol{y}_k = \boldsymbol{g}_{k+1} - \boldsymbol{g}_k$$
+
+
+其中 $\boldsymbol{g}_k = \nabla F(\boldsymbol{x}_k)$ 为目标函数的梯度向量。
+BFGS 的逆海塞矩阵迭代更新公式为：
+
+
+$$\boldsymbol{B}_{k+1} = (\boldsymbol{I} - \rho_k \boldsymbol{s}_k \boldsymbol{y}_k^T) \boldsymbol{B}_k (\boldsymbol{I} - \rho_k \boldsymbol{y}_k \boldsymbol{s}_k^T) + \rho_k \boldsymbol{s}_k \boldsymbol{s}_k^T$$
+
+
+其中 $\rho_k = \frac{1}{\boldsymbol{y}_k^T \boldsymbol{s}_k}$。
+通过该公式，每次迭代只需进行矩阵乘法即可更新近似逆海塞矩阵，从而避免了高昂的二阶导数计算与求逆开销。
+
+---
+
+##### 有限内存的 BFGS 算法 ($\text{L-BFGS}$)
+
+###### 背景与动机
+
+尽管标准 $\text{BFGS}$ 避免了海塞矩阵的求逆，但它仍需要存储一个 $n \times n$ 的稠密近似矩阵 $\boldsymbol{B}_k$。当 SLAM 系统中的优化变量维度 $n$ 极高时，存储该稠密矩阵的空间开销高达 $O(n^2)$，内存占用难以承受。
+为了解决大内存消耗问题，**有限内存的 BFGS 算法 ($\text{Limited-memory BFGS, L-BFGS}$)** 应运而生。
+
+###### 核心思想与两回路递归
+
+$\text{L-BFGS}$ 的核心思想是：**不再显式存储完整的稠密逆海塞矩阵，而是仅保存最近的 $m$ 次（通常 $m$ 取值在 5 到 20 之间）迭代产生的历史向量对 $\{(\boldsymbol{s}_i, \boldsymbol{y}_i)\}$**。
+在计算搜索方向时，算法利用这些有限的历史向量，通过高效的**两回路递归算法 (Two-Loop Recursion)** 直接计算出 $\boldsymbol{B}_k \boldsymbol{g}_k$：
+
+* **第一回路（逆向循环）**：从最新的向量对开始向前追溯，结合梯度计算临时标量和中间方向；
+* **设定初始矩阵**：我们需要一个最简单的初始逆 Hessian 矩阵 $H_k^0$，L-BFGS 这里偷了个懒，不用复杂的矩阵，直接用一个极简的对角矩阵（比如 $\gamma_k I$，其中 $\gamma_k$ 是根据最新一步的 $s$ 和 $y$ 动态算出来的标量缩放因子）
+* **第二回路（正向循环）**：利用初始的缩放矩阵结合历史向量向后递推，最终直接得出搜索方向。
+
+通过这种方式，$\text{L-BFGS}$ 将空间复杂度从 $O(n^2)$ 降低到了 $O(mn)$，使其非常适合处理变量维度极高、无法维护稠密矩阵的大规模非线性优化问题。
+
 ### 图优化
 #### 概念
 我们可以使用**因子图**（或**贝叶斯图**）来表示一个最小二乘问题，并使用`g2o`库或`ceres`库等进行求解。以b-样条曲线平滑路径为例，其需要解决一个线性最小二乘问题

@@ -319,6 +319,82 @@ $$d(k_c^{reverse},k_h)$$
 
 候选过滤解决“哪些帧值得比较”，回环边稀疏化解决“哪些已验证约束值得长期保留”。后者可以减少重复约束对图优化的过度拉扯，也能降低每次新增回环后的优化成本。
 
+#### 历史帧复用限制与有向序列进度 Gate
+
+重复坡道、长廊或分岔口可能让同一个历史子地图持续吸附多个当前关键帧。描述子和 GICP 对这些局部几何都可能给出较好分数，单纯依靠回环边稀疏化只能减少入图频率，不能阻止同一个错误 history 在间隔满足后再次进入 PGO。
+
+第一项改动为历史帧复用限制。系统用哈希表记录每个 history 被选为最终回环候选的次数，并在达到 `loop_history_max_current_matches` 后停止让该 history 参与 LCD 检索。这里只停用检索，不从 `keyframes_` 删除实体，因为关键帧仍要用于 PGO 节点查询、双向子地图构造、优化结果发布和地图重建。
+
+计数发生在 GICP 完成并选出最终候选之后、回环边稀疏化之前。即使候选随后因 current 间隔不足而没有加入 PGO，也会消耗 history 的复用额度。否则连续候选会一直被稀疏化跳过而不计数，等间隔达到阈值后仍可能把同一个假回环加入图中。
+
+```text
+描述子候选
+    ↓
+GICP 验证并选出最终候选
+    ↓
+history selected_count += 1
+    ↓
+达到上限后停止该 history 的后续 LCD 检索
+    ↓
+回环边稀疏化
+    ↓
+PGO
+```
+
+Garage bag 实测中，默认上限设为 2 后，同一个 history 与大量 current 重复连接的现象明显减少，部分原本被错误 history 抢占的 current 能够改选更合理的历史帧。该限制已经验证有效，但它属于次数保险丝：第一次和第二次假匹配仍会通过原有 gate，不能单独判断首次匹配真假。
+
+第二项改动为有向序列进度 gate。它以上一条真正加入 PGO 的回环边
+
+$$
+(C_a,H_a)
+$$
+
+作为锚点。对后续候选 $(C_i,H_i)$，使用累计里程计轨迹长度计算：
+
+$$
+\Delta s_c=s(C_i)-s(C_a),
+$$
+
+$$
+\Delta s_h=d\,[s(H_i)-s(H_a)],
+$$
+
+其中 $d\in\{+1,-1\}$ 表示 history 与 current 的行驶方向。同向经过历史轨迹时 $d=+1$，反向经过时 $d=-1$；代码根据锚点处 current 与 history 车体前向轴的点积确定方向。最终计算 history 的单边滞后量：
+
+$$
+e_{\text{lag}}=\Delta s_c-\Delta s_h.
+$$
+
+当
+
+$$
+e_{\text{lag}}>\tau_{\text{lag}}
+$$
+
+时拒绝候选。这里不能直接使用绝对值，因为当前要抑制的是“current 已向前行驶较远，而 history 仍停留在原位置或前进过慢”。history 进度超前时 $e_{\text{lag}}<0$，初版不会因此拒绝；若实测出现 history 向前跳跃型假回环，应另设独立的 lead gate，而不是混入同一个绝对值阈值。
+
+该 gate 放在描述子候选产生之后、GICP 之前：
+
+```text
+Iris / Cart 候选
+    ↓
+有向序列进度 gate
+    ↓ 仅通过者
+多初值 GICP
+    ↓
+最终候选与 history 复用计数
+    ↓
+回环边稀疏化与 PGO
+```
+
+锚点只在回环边真正加入 PGO 后更新，稀疏化跳过的候选不会改变锚点，避免未经入图的中间结果持续改变参考。该方法仍依赖第一条回环边基本可信；如果锚点本身就是假回环，序列 gate 只能检查后续运动是否与这条错误序列一致，不能恢复绝对地点身份。
+
+当前验证状态如下：
+
+- `loop_history_max_current_matches`：已通过 Garage bag 验证，能够减少单个 history 的一对多连接；
+- `loop_sequence_max_history_lag_m`：代码与日志已实现并通过编译，尚需使用同一 bag 复现段验证阈值；
+- Iris、Cart、GICP 的单帧质量 gate 仍然保留，序列 gate 只补充时间连续性约束，不替代几何验证。
+
 #### 在SLAM系统中的位置
 ```
 前端里程计(LIO/LVO) → 后端优化(PGO) → [回环检测: LiDAR Iris] → 回环约束 → 后端优化修正
@@ -949,6 +1025,8 @@ loop_enable: true
 loop_min_keyframe_gap: 30        # 最小帧间隔
 loop_min_travel_distance: 5.0    # 最小行驶距离
 loop_iris_distance_thresh: 0.30  # Iris Hamming 距离阈值
+loop_history_max_current_matches: 2  # 单个history最多被最终选中次数
+loop_sequence_max_history_lag_m: 5.0 # current相对history的最大单边进度滞后
 
 # GICP 验证参数
 loop_gicp_enable: true
